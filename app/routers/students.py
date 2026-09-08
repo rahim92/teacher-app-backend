@@ -24,6 +24,34 @@ from app.schemas.student import (
 router = APIRouter(tags=["students"])
 
 
+def _ensure_can_manage_student(session: Session, student: Student, current_user: User) -> None:
+    """Real authorization gap found during a review pass: `update_student`/
+    `delete_student` used to accept ANY authenticated teacher's token, with
+    no check that they have anything to do with the student's classroom --
+    unlike /assessments, /seat-assignments and class-delegates, which already
+    check this. That mattered more here than almost anywhere else in the
+    app: Student carries guardian_phone and medical_notes. Mirrors the same
+    "creator, homeroom teacher, or subject-teacher assignment" relation
+    /my-classrooms computes to decide who a classroom's teachers even are.
+    """
+    if current_user.role == UserRole.admin:
+        return
+    classroom = session.get(Classroom, student.classroom_id)
+    if not classroom:
+        raise HTTPException(status_code=404, detail="القسم غير موجود")
+    if classroom.teacher_id == current_user.id or classroom.homeroom_teacher_id == current_user.id:
+        return
+    has_assignment = session.exec(
+        select(TeacherClassroomAssignment).where(
+            TeacherClassroomAssignment.classroom_id == classroom.id,
+            TeacherClassroomAssignment.teacher_id == current_user.id,
+            TeacherClassroomAssignment.is_deleted == False,  # noqa: E712
+        )
+    ).first()
+    if not has_assignment:
+        raise HTTPException(status_code=403, detail="لا تُدرِّس في هذا القسم، فلا يمكنك تعديل بيانات تلاميذه.")
+
+
 @router.post("/students", response_model=StudentRead)
 def create_student(payload: StudentCreate, session: Session = Depends(get_session), _: User = Depends(get_current_user)):
     student = Student(**payload.model_dump())
@@ -49,11 +77,12 @@ def update_student(
     student_id: str,
     payload: StudentUpdate,
     session: Session = Depends(get_session),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     student = session.get(Student, student_id)
     if not student or student.is_deleted:
         raise HTTPException(status_code=404, detail="التلميذ غير موجود")
+    _ensure_can_manage_student(session, student, current_user)
 
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(student, field, value)
@@ -69,7 +98,7 @@ def update_student(
 def delete_student(
     student_id: str,
     session: Session = Depends(get_session),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Soft-deletes a student added by mistake (duplicate entry, wrong
     classroom, typo the teacher would rather re-enter than fix). Related
@@ -81,6 +110,7 @@ def delete_student(
     student = session.get(Student, student_id)
     if not student or student.is_deleted:
         raise HTTPException(status_code=404, detail="التلميذ غير موجود")
+    _ensure_can_manage_student(session, student, current_user)
     student.is_deleted = True
     student.updated_at = datetime.utcnow()
     session.add(student)

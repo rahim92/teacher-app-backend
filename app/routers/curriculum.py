@@ -5,7 +5,7 @@ from sqlmodel import Session, select
 
 from app.auth import get_current_user
 from app.database import get_session
-from app.models.common import GradeLevel
+from app.models.common import GradeLevel, UserRole
 from app.models.curriculum import AnnualPlan, CurriculumUnit, PlanItem
 from app.models.identity import User
 from app.models.session import LessonLog
@@ -124,10 +124,18 @@ def list_plan_items(plan_id: str, session: Session = Depends(get_session), _: Us
 
 
 @router.delete("/plan-items/{item_id}")
-def delete_plan_item(item_id: str, session: Session = Depends(get_session), _: User = Depends(get_current_user)):
+def delete_plan_item(item_id: str, session: Session = Depends(get_session), current_user: User = Depends(get_current_user)):
+    """Ownership check added during a review pass -- this endpoint originally
+    accepted any authenticated teacher's token with no check that the plan
+    item's AnnualPlan even belongs to them, unlike every other delete in the
+    app (assessments, seat-assignments, message-templates all check this).
+    """
     item = session.get(PlanItem, item_id)
     if not item or item.is_deleted:
         raise HTTPException(status_code=404, detail="عنصر الخطة غير موجود")
+    plan = session.get(AnnualPlan, item.annual_plan_id)
+    if plan and plan.teacher_id != current_user.id and current_user.role != UserRole.admin:
+        raise HTTPException(status_code=403, detail="يمكن فقط لصاحب الخطة أو الإدارة حذف عناصرها.")
     item.is_deleted = True
     item.updated_at = datetime.utcnow()
     session.add(item)

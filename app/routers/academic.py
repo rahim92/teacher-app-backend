@@ -290,16 +290,32 @@ def set_homeroom_teacher(
     classroom_id: str,
     payload: HomeroomTeacherUpdate,
     session: Session = Depends(get_session),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """A teacher may be 'الأستاذ الرئيسي' for AT MOST ONE classroom per
     academic year (see the unique constraint on Classroom). We check this
     proactively for a friendly error message, and still rely on the DB
     constraint as the real guarantee against a race between two requests.
+
+    Real authorization gap found during a review pass: this endpoint used to
+    accept ANY authenticated teacher's token with no ownership check at
+    all -- meaning any teacher could reassign (hijack) another teacher's
+    classroom leadership, which also gates who can manage class delegates
+    and read the full council report. Restricted to whoever created the
+    classroom, whoever already holds the homeroom role on it (so a handoff
+    is still possible), or an admin.
     """
     classroom = session.get(Classroom, classroom_id)
     if not classroom or classroom.is_deleted:
         raise HTTPException(status_code=404, detail="القسم غير موجود")
+    is_creator = classroom.teacher_id == current_user.id
+    is_current_homeroom = classroom.homeroom_teacher_id == current_user.id
+    is_admin = current_user.role == UserRole.admin
+    if not (is_creator or is_current_homeroom or is_admin):
+        raise HTTPException(
+            status_code=403,
+            detail="تعيين الأستاذ الرئيسي متاح فقط لمنشئ القسم أو الأستاذ الرئيسي الحالي أو الإدارة.",
+        )
 
     if payload.homeroom_teacher_id:
         conflict = session.exec(

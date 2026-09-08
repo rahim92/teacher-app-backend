@@ -325,14 +325,22 @@ def update_remediation_participant(
     participant_id: str,
     payload: RemediationParticipantUpdate,
     session: Session = Depends(get_session),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Records the follow-up outcome (a later re-check) for one student in
     one remediation group -- this is what turns the group from an anecdotal
-    "we did a support session" into a measurable before/after."""
+    "we did a support session" into a measurable before/after.
+
+    Ownership check added during a review pass -- previously any
+    authenticated teacher's token could record a follow-up outcome for any
+    other teacher's remediation group.
+    """
     participant = session.get(RemediationParticipant, participant_id)
     if not participant or participant.is_deleted:
         raise HTTPException(status_code=404, detail="المشارك غير موجود")
+    remediation_session = session.get(RemediationSession, participant.remediation_session_id)
+    if remediation_session and remediation_session.teacher_id != current_user.id and current_user.role != UserRole.admin:
+        raise HTTPException(status_code=403, detail="يمكن فقط لصاحب حصة المعالجة أو الإدارة تسجيل نتيجة المتابعة.")
     participant.after_level = payload.after_level
     participant.updated_at = datetime.utcnow()
     session.add(participant)

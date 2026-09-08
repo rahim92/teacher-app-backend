@@ -676,3 +676,77 @@ def test_annual_plan_pacing_module():
     assert progress_final["delivered_count"] == 1
     assert progress_final["status"] == "slightly_behind"
     assert client.delete("/plan-items/does-not-exist", headers=headers).status_code == 404
+
+
+def test_cross_teacher_authorization_gaps():
+    """Found during a review pass: several mutation endpoints accepted ANY
+    authenticated teacher's token with no check that they had anything to do
+    with the resource being changed -- unlike /assessments, /seat-assignments
+    and class-delegates, which already enforced this. Covers the four gaps
+    found and fixed: student edit/delete (carries guardian_phone and
+    medical_notes -- the most sensitive data in the app), reassigning a
+    classroom's homeroom teacher (which also gates delegate management and
+    the council report), deleting another teacher's annual-plan item, and
+    recording a follow-up outcome on another teacher's remediation group.
+    Also confirms a teacher who legitimately teaches a subject in the
+    classroom (via TeacherClassroomAssignment, not as its creator) is still
+    allowed to edit its students -- the fix must not be so strict it breaks
+    the every-day multi-teacher-per-classroom case documented in
+    test_my_classrooms_covers_creator_homeroom_and_subject_teacher_roles.
+    """
+    headers_a, teacher_a = _register_and_login("authz_owner")
+    headers_b, _teacher_b = _register_and_login("authz_stranger")
+    year, _term, classroom = _setup_classroom(headers_a, "1AM - authz")
+    student = client.post(
+        "/students", json={"classroom_id": classroom["id"], "first_name": "إيمان", "last_name": "زروقي"}, headers=headers_a
+    ).json()
+
+    # An unrelated teacher can neither edit nor delete this student.
+    assert client.patch(f"/students/{student['id']}", json={"first_name": "إيمان2"}, headers=headers_b).status_code == 403
+    assert client.delete(f"/students/{student['id']}", headers=headers_b).status_code == 403
+    # The owning teacher still can.
+    ok = client.patch(f"/students/{student['id']}", json={"first_name": "إيمان2"}, headers=headers_a)
+    assert ok.status_code == 200, ok.text
+
+    # A teacher who actually teaches a subject in this classroom (assigned,
+    # not the creator) must still be allowed to edit its students.
+    subject = client.post("/subjects", json={"name": "العربية"}, headers=headers_a).json()
+    headers_c, teacher_c = _register_and_login("authz_subject_teacher")
+    assign = client.post("/teacher-classroom-assignments", json={
+        "teacher_id": teacher_c["id"], "classroom_id": classroom["id"], "subject_id": subject["id"], "academic_year_id": year["id"],
+    }, headers=headers_a)
+    assert assign.status_code == 200, assign.text
+    assigned_edit = client.patch(f"/students/{student['id']}", json={"last_name": "زروقي2"}, headers=headers_c)
+    assert assigned_edit.status_code == 200, assigned_edit.text
+
+    # An unrelated teacher cannot hijack this classroom's homeroom-teacher role.
+    hijack = client.patch(f"/classrooms/{classroom['id']}/homeroom-teacher", json={"homeroom_teacher_id": teacher_a["id"]}, headers=headers_b)
+    assert hijack.status_code == 403
+    # The classroom's own creator still can.
+    set_ok = client.patch(f"/classrooms/{classroom['id']}/homeroom-teacher", json={"homeroom_teacher_id": teacher_a["id"]}, headers=headers_a)
+    assert set_ok.status_code == 200, set_ok.text
+
+    # An unrelated teacher cannot delete another teacher's annual-plan item.
+    unit = client.post("/curriculum-units", json={
+        "subject_id": subject["id"], "grade_level": "1AM", "title": "القراءة", "unit_type": "unit", "order_index": 1, "year_version": "2026-2027",
+    }, headers=headers_a).json()
+    plan = client.post("/annual-plans", json={
+        "subject_id": subject["id"], "grade_level": "1AM", "academic_year_id": year["id"],
+    }, headers=headers_a).json()
+    item = client.post("/plan-items", json={
+        "annual_plan_id": plan["id"], "curriculum_unit_id": unit["id"], "target_week_number": 1, "order_index": 1,
+    }, headers=headers_a).json()
+    assert client.delete(f"/plan-items/{item['id']}", headers=headers_b).status_code == 403
+    assert client.delete(f"/plan-items/{item['id']}", headers=headers_a).status_code == 200
+
+    # An unrelated teacher cannot record a follow-up outcome on another
+    # teacher's remediation group.
+    remediation = client.post("/remediation-sessions", json={
+        "classroom_id": classroom["id"], "date": "2026-09-20", "targeted_curriculum_unit_id": unit["id"],
+    }, headers=headers_a).json()
+    participant = client.post("/remediation-participants", json={
+        "remediation_session_id": remediation["id"], "student_id": student["id"], "before_level": "not_acquired",
+    }, headers=headers_a).json()
+    assert client.patch(f"/remediation-participants/{participant['id']}", json={"after_level": "acquired"}, headers=headers_b).status_code == 403
+    owner_update = client.patch(f"/remediation-participants/{participant['id']}", json={"after_level": "acquired"}, headers=headers_a)
+    assert owner_update.status_code == 200, owner_update.text
