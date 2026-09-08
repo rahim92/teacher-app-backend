@@ -12,6 +12,7 @@ from app.schemas.session import (
     ClassSessionClose,
     ClassSessionCreate,
     ClassSessionRead,
+    LessonLogCreate,
     LessonLogRead,
     SessionEventCreate,
     SessionEventRead,
@@ -93,6 +94,31 @@ def close_session(
     session.commit()
     session.refresh(class_session)
     return class_session
+
+
+@router.post("/lesson-logs", response_model=LessonLogRead)
+def create_lesson_log(
+    payload: LessonLogCreate,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Direct 'mark this lesson as taught' entry point, independent of the
+    class-session open/close lifecycle. `close_session` above already
+    creates a LessonLog when a curriculum_unit_id is supplied, but no
+    existing screen in the app drives a teacher through that path with a
+    curriculum unit attached -- the continuous-monitoring flow is about
+    attendance/behavior taps, not curriculum pacing. Rather than bolting a
+    curriculum-unit picker onto that unrelated flow, the new annual-plan
+    screen calls this endpoint directly to record "this planned unit was
+    delivered on this date". Both paths write the same LessonLog table, so
+    `GET /classrooms/{id}/lesson-logs` and the pacing-progress indicator see
+    entries from either one without caring which path created them.
+    """
+    log = LessonLog(**payload.model_dump(), teacher_id=current_user.id)
+    session.add(log)
+    session.commit()
+    session.refresh(log)
+    return log
 
 
 @router.get("/classrooms/{classroom_id}/lesson-logs", response_model=list[LessonLogRead])

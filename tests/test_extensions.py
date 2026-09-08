@@ -568,3 +568,111 @@ def test_diagnostic_remediation_module():
     assert updated.json()["after_level"] == "in_progress"
 
     assert client.patch("/remediation-participants/does-not-exist", json={"after_level": "acquired"}, headers=headers).status_code == 404
+
+
+def test_annual_plan_pacing_module():
+    """The annual-plan/pacing workflow: create a plan for one subject+grade+
+    year, add plan items (curriculum unit + target week), list them back in
+    week order, mark one as delivered via the new direct POST /lesson-logs
+    (independent of the class-session open/close lifecycle -- see
+    create_lesson_log's docstring), and confirm the progress endpoint
+    reflects exactly which planned units were delivered and which weren't.
+    Also covers listing plans by teacher+subject+grade+year (so the UI can
+    find an existing plan instead of creating a duplicate) and deleting a
+    plan item.
+    """
+    headers, _teacher = _register_and_login("plan_t")
+    other_headers, _ = _register_and_login("plan_other_t")
+    year, _term, classroom = _setup_classroom(headers, "1AM - plan")
+    subject = client.post("/subjects", json={"name": "الرياضيات"}, headers=headers).json()
+
+    unit1 = client.post("/curriculum-units", json={
+        "subject_id": subject["id"], "grade_level": "1AM", "title": "الأعداد الطبيعية",
+        "unit_type": "unit", "order_index": 1, "year_version": "2026-2027",
+    }, headers=headers).json()
+    unit2 = client.post("/curriculum-units", json={
+        "subject_id": subject["id"], "grade_level": "1AM", "title": "الكسور",
+        "unit_type": "unit", "order_index": 2, "year_version": "2026-2027",
+    }, headers=headers).json()
+    unit3 = client.post("/curriculum-units", json={
+        "subject_id": subject["id"], "grade_level": "1AM", "title": "الأعداد العشرية",
+        "unit_type": "unit", "order_index": 3, "year_version": "2026-2027",
+    }, headers=headers).json()
+
+    # No plan yet for this subject+grade+year.
+    empty_listing = client.get(
+        "/annual-plans",
+        params={"subject_id": subject["id"], "grade_level": "1AM", "academic_year_id": year["id"]},
+        headers=headers,
+    ).json()
+    assert empty_listing == []
+    # Another teacher's plan must never show up in this listing either.
+    other_year, _, _ = _setup_classroom(other_headers, "1AM - plan-other")
+
+    plan = client.post("/annual-plans", json={
+        "subject_id": subject["id"], "grade_level": "1AM", "academic_year_id": year["id"],
+    }, headers=headers)
+    assert plan.status_code == 200, plan.text
+    plan = plan.json()
+
+    listing = client.get(
+        "/annual-plans",
+        params={"subject_id": subject["id"], "grade_level": "1AM", "academic_year_id": year["id"]},
+        headers=headers,
+    ).json()
+    assert {p["id"] for p in listing} == {plan["id"]}
+    other_listing = client.get(
+        "/annual-plans",
+        params={"subject_id": subject["id"], "grade_level": "1AM", "academic_year_id": other_year["id"]},
+        headers=other_headers,
+    ).json()
+    assert other_listing == []
+
+    item1 = client.post("/plan-items", json={
+        "annual_plan_id": plan["id"], "curriculum_unit_id": unit1["id"], "target_week_number": 1, "order_index": 1,
+    }, headers=headers)
+    assert item1.status_code == 200, item1.text
+    item1 = item1.json()
+    item2 = client.post("/plan-items", json={
+        "annual_plan_id": plan["id"], "curriculum_unit_id": unit3["id"], "target_week_number": 3, "order_index": 2,
+    }, headers=headers).json()
+    # Deliberately posted out of week order to confirm the listing sorts.
+    item3 = client.post("/plan-items", json={
+        "annual_plan_id": plan["id"], "curriculum_unit_id": unit2["id"], "target_week_number": 2, "order_index": 1,
+    }, headers=headers).json()
+
+    items_listing = client.get(f"/annual-plans/{plan['id']}/items", headers=headers).json()
+    assert [i["id"] for i in items_listing] == [item1["id"], item3["id"], item2["id"]]
+
+    # Nothing delivered yet -- everything pending (3 distinct planned units).
+    progress = client.get(f"/annual-plans/{plan['id']}/progress", params={"classroom_id": classroom["id"]}, headers=headers).json()
+    assert progress == {
+        "planned_total": 3, "delivered_count": 0, "delivered_unit_ids": [], "delay_in_units": 3, "status": "behind",
+    }
+
+    # Mark unit1 as delivered directly (no class-session involved).
+    log = client.post("/lesson-logs", json={
+        "classroom_id": classroom["id"], "date": "2026-09-15", "curriculum_unit_id": unit1["id"], "observations": "درس تمهيدي",
+    }, headers=headers)
+    assert log.status_code == 200, log.text
+    logs_listing = client.get(f"/classrooms/{classroom['id']}/lesson-logs", headers=headers).json()
+    assert [entry["curriculum_unit_id"] for entry in logs_listing] == [unit1["id"]]
+
+    progress_after = client.get(f"/annual-plans/{plan['id']}/progress", params={"classroom_id": classroom["id"]}, headers=headers).json()
+    assert progress_after["delivered_count"] == 1
+    assert progress_after["delivered_unit_ids"] == [unit1["id"]]
+    assert progress_after["delay_in_units"] == 2
+    assert progress_after["status"] == "slightly_behind"
+
+    # Delete the plan item targeting unit3 -- it must drop out of the
+    # listing and no longer count toward planned_total (unit1 and unit2,
+    # still planned via item1/item3, must remain).
+    delete_resp = client.delete(f"/plan-items/{item2['id']}", headers=headers)
+    assert delete_resp.status_code == 200, delete_resp.text
+    items_after_delete = client.get(f"/annual-plans/{plan['id']}/items", headers=headers).json()
+    assert {i["id"] for i in items_after_delete} == {item1["id"], item3["id"]}
+    progress_final = client.get(f"/annual-plans/{plan['id']}/progress", params={"classroom_id": classroom["id"]}, headers=headers).json()
+    assert progress_final["planned_total"] == 2
+    assert progress_final["delivered_count"] == 1
+    assert progress_final["status"] == "slightly_behind"
+    assert client.delete("/plan-items/does-not-exist", headers=headers).status_code == 404

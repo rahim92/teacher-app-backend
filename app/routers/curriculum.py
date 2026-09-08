@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
 from app.auth import get_current_user
@@ -75,6 +77,31 @@ def create_annual_plan(
     return plan
 
 
+@router.get("/annual-plans", response_model=list[AnnualPlanRead])
+def list_annual_plans(
+    subject_id: str,
+    grade_level: GradeLevel,
+    academic_year_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Lets the UI check whether this teacher already has an annual plan for
+    one subject+grade+year before offering to create a new one. Nothing in
+    the schema enforces at-most-one-plan, so this is a UI-level convention,
+    not a hard constraint -- scoped to the current teacher (teacher_id) since
+    two teachers of the same subject+grade must never see each other's plan.
+    """
+    return session.exec(
+        select(AnnualPlan).where(
+            AnnualPlan.teacher_id == current_user.id,
+            AnnualPlan.subject_id == subject_id,
+            AnnualPlan.grade_level == grade_level,
+            AnnualPlan.academic_year_id == academic_year_id,
+            AnnualPlan.is_deleted == False,  # noqa: E712
+        )
+    ).all()
+
+
 @router.post("/plan-items", response_model=PlanItemRead)
 def create_plan_item(payload: PlanItemCreate, session: Session = Depends(get_session), _: User = Depends(get_current_user)):
     item = PlanItem(**payload.model_dump())
@@ -82,6 +109,30 @@ def create_plan_item(payload: PlanItemCreate, session: Session = Depends(get_ses
     session.commit()
     session.refresh(item)
     return item
+
+
+@router.get("/annual-plans/{plan_id}/items", response_model=list[PlanItemRead])
+def list_plan_items(plan_id: str, session: Session = Depends(get_session), _: User = Depends(get_current_user)):
+    """Ordered by target week so the client can render the plan as a
+    week-by-week pacing table directly.
+    """
+    return session.exec(
+        select(PlanItem)
+        .where(PlanItem.annual_plan_id == plan_id, PlanItem.is_deleted == False)  # noqa: E712
+        .order_by(PlanItem.target_week_number, PlanItem.order_index)
+    ).all()
+
+
+@router.delete("/plan-items/{item_id}")
+def delete_plan_item(item_id: str, session: Session = Depends(get_session), _: User = Depends(get_current_user)):
+    item = session.get(PlanItem, item_id)
+    if not item or item.is_deleted:
+        raise HTTPException(status_code=404, detail="عنصر الخطة غير موجود")
+    item.is_deleted = True
+    item.updated_at = datetime.utcnow()
+    session.add(item)
+    session.commit()
+    return {"ok": True}
 
 
 @router.get("/annual-plans/{plan_id}/progress")
@@ -94,6 +145,10 @@ def get_plan_progress(
     """Compares planned pacing (PlanItem count) against actually-delivered
     lessons (LessonLog count) for one classroom following this plan, and
     returns a simple delay indicator in number of lessons.
+
+    Also returns `delivered_unit_ids` so the client can mark each individual
+    plan item as delivered/pending in the pacing table, instead of only
+    showing one aggregate number.
     """
     planned_units = session.exec(
         select(PlanItem).where(PlanItem.annual_plan_id == plan_id, PlanItem.is_deleted == False)  # noqa: E712
@@ -111,6 +166,7 @@ def get_plan_progress(
     return {
         "planned_total": len(planned_unit_ids),
         "delivered_count": delivered_count,
+        "delivered_unit_ids": sorted(planned_unit_ids & delivered_unit_ids),
         "delay_in_units": max(delay, 0),
         "status": "on_track" if delay <= 0 else ("slightly_behind" if delay <= 2 else "behind"),
     }
