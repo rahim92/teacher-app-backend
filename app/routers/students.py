@@ -65,6 +65,36 @@ def update_student(
     return student
 
 
+@router.delete("/students/{student_id}", status_code=204)
+def delete_student(
+    student_id: str,
+    session: Session = Depends(get_session),
+    _: User = Depends(get_current_user),
+):
+    """Soft-deletes a student added by mistake (duplicate entry, wrong
+    classroom, typo the teacher would rather re-enter than fix). Related
+    rows (special needs, seat assignments, delegate record...) are left in
+    place with is_deleted left as-is on THEM -- same "don't cascade" choice
+    already made for class delegates -- so a teacher's own history isn't
+    silently wiped if a student is restored later via direct DB access.
+    """
+    student = session.get(Student, student_id)
+    if not student or student.is_deleted:
+        raise HTTPException(status_code=404, detail="التلميذ غير موجود")
+    student.is_deleted = True
+    student.updated_at = datetime.utcnow()
+    session.add(student)
+    session.commit()
+
+
+# Two students may deliberately share one desk (seat_row/seat_col) -- there's
+# no DB uniqueness on that pair, only this per-endpoint cap, so a teacher who
+# wants a 3-per-bench arrangement isn't blocked by a schema-level constraint,
+# just this documented product decision (matches how the "at most one
+# homeroom" rule lives at the DB layer while this lives at the endpoint).
+MAX_STUDENTS_PER_DESK = 2
+
+
 @router.put("/seat-assignments", response_model=SeatAssignmentRead)
 def upsert_seat_assignment(
     payload: SeatAssignmentUpsert,
@@ -73,6 +103,11 @@ def upsert_seat_assignment(
 ):
     """One row per (teacher, classroom, student) -- moving a student's seat
     just updates seat_row/seat_col in place rather than creating a new row.
+
+    A desk (one seat_row/seat_col pair) may hold up to MAX_STUDENTS_PER_DESK
+    students -- e.g. a shared two-person table -- enforced here rather than
+    with a DB unique constraint, since it's a capacity rule, not an identity
+    one.
     """
     existing = session.exec(
         select(SeatAssignment).where(
@@ -83,6 +118,20 @@ def upsert_seat_assignment(
             SeatAssignment.is_deleted == False,  # noqa: E712
         )
     ).first()
+
+    occupants = session.exec(
+        select(SeatAssignment).where(
+            SeatAssignment.teacher_id == current_user.id,
+            SeatAssignment.classroom_id == payload.classroom_id,
+            SeatAssignment.term_id == payload.term_id,
+            SeatAssignment.seat_row == payload.seat_row,
+            SeatAssignment.seat_col == payload.seat_col,
+            SeatAssignment.is_deleted == False,  # noqa: E712
+            SeatAssignment.student_id != payload.student_id,
+        )
+    ).all()
+    if len(occupants) >= MAX_STUDENTS_PER_DESK:
+        raise HTTPException(status_code=400, detail=f"هذا المقعد ممتلئ (الحد الأقصى {MAX_STUDENTS_PER_DESK} تلميذين في الطاولة الواحدة).")
 
     if existing:
         existing.seat_row = payload.seat_row
@@ -97,6 +146,25 @@ def upsert_seat_assignment(
     session.commit()
     session.refresh(seat)
     return seat
+
+
+@router.delete("/seat-assignments/{seat_id}", status_code=204)
+def delete_seat_assignment(
+    seat_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Un-seats one student -- e.g. to free a shared desk, or when a student
+    leaves seating entirely. Scoped to the calling teacher's own map, same as
+    every other seat-assignment operation.
+    """
+    seat = session.get(SeatAssignment, seat_id)
+    if not seat or seat.is_deleted or seat.teacher_id != current_user.id:
+        raise HTTPException(status_code=404, detail="لا يوجد تعيين مقعد بهذا المعرّف")
+    seat.is_deleted = True
+    seat.updated_at = datetime.utcnow()
+    session.add(seat)
+    session.commit()
 
 
 @router.get("/classrooms/{classroom_id}/seat-assignments", response_model=list[SeatAssignmentRead])

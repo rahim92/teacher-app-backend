@@ -59,6 +59,39 @@ class ClassroomRead(ClassroomCreate):
     homeroom_teacher_id: Optional[str] = None
 
 
+class TaughtSubjectInfo(BaseModel):
+    subject_id: str
+    subject_name: str
+
+
+class MyClassroomRead(ClassroomRead):
+    """Enriched view used by /my-classrooms: what role(s) THIS teacher holds
+    in this classroom. A teacher commonly teaches several classrooms (one
+    TeacherClassroomAssignment per subject/classroom); they can be the
+    homeroom teacher ('الأستاذ الرئيسي') of at most one, per the unique
+    constraint on Classroom.
+    """
+
+    is_creator: bool
+    is_homeroom: bool
+    homeroom_teacher_name: Optional[str] = None
+    taught_subjects: list[TaughtSubjectInfo] = []
+
+
+class ClassroomDirectoryEntry(BaseModel):
+    """Lightweight listing so a teacher can find a classroom created by a
+    colleague and request to teach a subject in it -- without exposing the
+    full ClassroomRead (roster counts, etc.) of a classroom they're not yet
+    related to.
+    """
+
+    id: str
+    name: str
+    grade_level: GradeLevel
+    academic_year_id: str
+    homeroom_teacher_name: Optional[str] = None
+
+
 class HomeroomTeacherUpdate(BaseModel):
     homeroom_teacher_id: Optional[str] = None  # None clears the assignment
 

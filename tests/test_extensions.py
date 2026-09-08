@@ -169,3 +169,212 @@ def test_seat_assignment_per_term_and_behavior_score():
     # tardiness: one tap, penalty 0.5 off the default max of 2
     assert breakdown["tardiness"]["points_earned"] == 1.5
     assert score["total"] <= score["total_max"]
+
+
+def test_my_classrooms_covers_creator_homeroom_and_subject_teacher_roles():
+    """A teacher in a real متوسط school commonly: creates none of their
+    classrooms, is homeroom ('مسؤول') of at most one, and teaches a subject
+    in several others. /my-classrooms is what the dashboard's classroom
+    switcher relies on to show all of that in one call.
+    """
+    headers_a, teacher_a = _register_and_login("multi_a")
+    headers_b, teacher_b = _register_and_login("multi_b")
+    year, _term, classroom1 = _setup_classroom(headers_a, "1AM - multi-1")
+    classroom2 = client.post(
+        "/classrooms", json={"academic_year_id": year["id"], "name": "1AM - multi-2", "grade_level": "1AM"}, headers=headers_a
+    ).json()
+    # A third classroom, same academic year, created (and remaining owned) by
+    # someone else entirely -- this is what makes the homeroom conflict below
+    # a real same-year conflict rather than a coincidence across two years.
+    headers_c, _teacher_c = _register_and_login("multi_c")
+    classroom3 = client.post(
+        "/classrooms", json={"academic_year_id": year["id"], "name": "1AM - multi-3", "grade_level": "1AM"}, headers=headers_c
+    ).json()
+
+    math = client.post("/subjects", json={"name": "الرياضيات"}, headers=headers_b).json()
+    science = client.post("/subjects", json={"name": "العلوم"}, headers=headers_b).json()
+
+    # Teacher B never creates a classroom, but is set as homeroom of classroom1
+    # and teaches a subject in both classroom1 and classroom2.
+    client.patch(f"/classrooms/{classroom1['id']}/homeroom-teacher", json={"homeroom_teacher_id": teacher_b["id"]}, headers=headers_a)
+    client.post("/teacher-classroom-assignments", json={
+        "teacher_id": teacher_b["id"], "classroom_id": classroom1["id"], "subject_id": math["id"], "academic_year_id": year["id"],
+    }, headers=headers_b)
+    client.post("/teacher-classroom-assignments", json={
+        "teacher_id": teacher_b["id"], "classroom_id": classroom2["id"], "subject_id": science["id"], "academic_year_id": year["id"],
+    }, headers=headers_b)
+
+    mine = client.get("/my-classrooms", headers=headers_b).json()
+    by_id = {c["id"]: c for c in mine}
+    assert set(by_id.keys()) == {classroom1["id"], classroom2["id"]}  # classroom3 never touched by B
+
+    c1 = by_id[classroom1["id"]]
+    assert c1["is_creator"] is False
+    assert c1["is_homeroom"] is True
+    assert [s["subject_name"] for s in c1["taught_subjects"]] == ["الرياضيات"]
+
+    c2 = by_id[classroom2["id"]]
+    assert c2["is_homeroom"] is False
+    assert [s["subject_name"] for s in c2["taught_subjects"]] == ["العلوم"]
+
+    # Teacher A still only sees classrooms they created.
+    mine_a = client.get("/my-classrooms", headers=headers_a).json()
+    assert {c["id"] for c in mine_a} == {classroom1["id"], classroom2["id"]}
+    assert all(c["is_creator"] for c in mine_a)
+
+    # A teacher who is homeroom of classroom1 cannot ALSO become homeroom of
+    # classroom3 -- the one-homeroom-per-teacher-per-year rule still holds
+    # regardless of how many classrooms they teach a subject in.
+    conflict = client.patch(
+        f"/classrooms/{classroom3['id']}/homeroom-teacher", json={"homeroom_teacher_id": teacher_b["id"]}, headers=headers_c
+    )
+    assert conflict.status_code == 400
+
+    # The directory lists every classroom in the school, including ones B
+    # has no relation to yet -- what lets B discover classroom3 to join it.
+    directory = client.get("/classrooms/directory", headers=headers_b).json()
+    assert classroom3["id"] in {c["id"] for c in directory}
+
+
+def test_student_edit_and_soft_delete():
+    """A teacher fixing a typo in a student's name, or removing one entered
+    by mistake, should never lose the classroom -- edit and delete both act
+    on one student without disturbing the rest of the roster.
+    """
+    headers, _teacher = _register_and_login("roster_edit")
+    _year, _term, classroom = _setup_classroom(headers, "1AM - roster-edit")
+    student = client.post(
+        "/students", json={"classroom_id": classroom["id"], "first_name": "ياسن", "last_name": "بن علي"}, headers=headers
+    ).json()
+    other = client.post(
+        "/students", json={"classroom_id": classroom["id"], "first_name": "نور", "last_name": "شريف"}, headers=headers
+    ).json()
+
+    fixed = client.patch(f"/students/{student['id']}", json={"first_name": "ياسين"}, headers=headers)
+    assert fixed.status_code == 200, fixed.text
+    assert fixed.json()["first_name"] == "ياسين"
+    assert fixed.json()["last_name"] == "بن علي"  # untouched field stays as-is
+
+    deleted = client.delete(f"/students/{student['id']}", headers=headers)
+    assert deleted.status_code == 204
+
+    roster = client.get(f"/classrooms/{classroom['id']}/students", headers=headers).json()
+    assert {s["id"] for s in roster} == {other["id"]}
+
+    # A deleted student is gone from every student-scoped endpoint, not just
+    # the roster listing.
+    gone = client.get(f"/students/{student['id']}/special-needs", headers=headers)
+    assert gone.status_code == 404
+
+    # Deleting the same student twice is a clean 404, not a crash.
+    redelete = client.delete(f"/students/{student['id']}", headers=headers)
+    assert redelete.status_code == 404
+
+
+def test_seat_assignment_shared_desk_and_unseat():
+    """Two students may share one desk (a common bench arrangement), capped
+    at two; un-seating one frees the desk for someone else.
+    """
+    headers, _teacher = _register_and_login("seat_pair")
+    _year, _term, classroom = _setup_classroom(headers, "1AM - seat-pair")
+    s1 = client.post("/students", json={"classroom_id": classroom["id"], "first_name": "علي", "last_name": "1"}, headers=headers).json()
+    s2 = client.post("/students", json={"classroom_id": classroom["id"], "first_name": "سعاد", "last_name": "2"}, headers=headers).json()
+    s3 = client.post("/students", json={"classroom_id": classroom["id"], "first_name": "رياض", "last_name": "3"}, headers=headers).json()
+
+    seat1 = client.put("/seat-assignments", json={"classroom_id": classroom["id"], "student_id": s1["id"], "seat_row": 1, "seat_col": 1}, headers=headers)
+    assert seat1.status_code == 200, seat1.text
+    seat2 = client.put("/seat-assignments", json={"classroom_id": classroom["id"], "student_id": s2["id"], "seat_row": 1, "seat_col": 1}, headers=headers)
+    assert seat2.status_code == 200, seat2.text  # same desk, second occupant -- allowed
+
+    desk = [a for a in client.get(f"/classrooms/{classroom['id']}/seat-assignments", headers=headers).json() if a["seat_row"] == 1 and a["seat_col"] == 1]
+    assert {a["student_id"] for a in desk} == {s1["id"], s2["id"]}
+
+    # A third student at the same desk is refused -- max two per table.
+    overflow = client.put("/seat-assignments", json={"classroom_id": classroom["id"], "student_id": s3["id"], "seat_row": 1, "seat_col": 1}, headers=headers)
+    assert overflow.status_code == 400
+
+    # Un-seat the first occupant -> the desk has room again.
+    unseat = client.delete(f"/seat-assignments/{seat1.json()['id']}", headers=headers)
+    assert unseat.status_code == 204
+    now_fits = client.put("/seat-assignments", json={"classroom_id": classroom["id"], "student_id": s3["id"], "seat_row": 1, "seat_col": 1}, headers=headers)
+    assert now_fits.status_code == 200, now_fits.text
+
+    desk_after = [a for a in client.get(f"/classrooms/{classroom['id']}/seat-assignments", headers=headers).json() if a["seat_row"] == 1 and a["seat_col"] == 1]
+    assert {a["student_id"] for a in desk_after} == {s2["id"], s3["id"]}
+
+
+def test_grade_entry_list_upsert_and_delete():
+    """The grade-entry screen's whole workflow: create a test, list it back
+    (filtered by subject/term the same way /council filters), enter and then
+    correct a student's mark without hitting the unique-score constraint,
+    and delete a wrongly created test so it (and its marks) disappear from
+    every view -- including the council averages that read it.
+    """
+    headers, teacher = _register_and_login("grade_t")
+    headers_other, _ = _register_and_login("grade_other")
+    year, term, classroom = _setup_classroom(headers, "1AM - grades")
+    subject = client.post("/subjects", json={"name": "الرياضيات"}, headers=headers).json()
+    s1 = client.post("/students", json={"classroom_id": classroom["id"], "first_name": "أمين", "last_name": "1"}, headers=headers).json()
+    s2 = client.post("/students", json={"classroom_id": classroom["id"], "first_name": "هدى", "last_name": "2"}, headers=headers).json()
+    # /council only reports averages for subjects the teacher is formally
+    # assigned to teach in this classroom -- needed for the subject to
+    # appear in subject_averages at all (not just as a None average).
+    client.post("/teacher-classroom-assignments", json={
+        "teacher_id": teacher["id"], "classroom_id": classroom["id"], "subject_id": subject["id"], "academic_year_id": year["id"],
+    }, headers=headers)
+
+    created = client.post("/assessments", json={
+        "classroom_id": classroom["id"], "subject_id": subject["id"], "assessment_type": "test",
+        "title": "الفرض الأول", "date": "2025-10-05", "coefficient": 1, "max_score": 20,
+    }, headers=headers)
+    assert created.status_code == 200, created.text
+    assessment = created.json()
+
+    # An assessment outside the term's date range and one for a different
+    # subject shouldn't show up when the grade screen filters by both.
+    client.post("/assessments", json={
+        "classroom_id": classroom["id"], "subject_id": subject["id"], "assessment_type": "test",
+        "title": "خارج الفصل", "date": "2026-02-01", "coefficient": 1, "max_score": 20,
+    }, headers=headers)
+    other_subject = client.post("/subjects", json={"name": "العلوم"}, headers=headers).json()
+    client.post("/assessments", json={
+        "classroom_id": classroom["id"], "subject_id": other_subject["id"], "assessment_type": "test",
+        "title": "مادة أخرى", "date": "2025-10-06", "coefficient": 1, "max_score": 20,
+    }, headers=headers)
+
+    listing = client.get(f"/classrooms/{classroom['id']}/assessments", params={
+        "subject_id": subject["id"], "term_id": term["id"],
+    }, headers=headers).json()
+    assert {a["id"] for a in listing} == {assessment["id"]}
+
+    # Enter a mark, then correct it -- PUT upserts instead of hitting the
+    # (assessment_id, student_id) unique constraint a second POST would.
+    first_put = client.put("/assessment-scores", json={"assessment_id": assessment["id"], "student_id": s1["id"], "score": 12}, headers=headers)
+    assert first_put.status_code == 200, first_put.text
+    corrected = client.put("/assessment-scores", json={"assessment_id": assessment["id"], "student_id": s1["id"], "score": 15.5}, headers=headers)
+    assert corrected.status_code == 200, corrected.text
+    client.put("/assessment-scores", json={"assessment_id": assessment["id"], "student_id": s2["id"], "score": 9}, headers=headers)
+
+    scores = client.get(f"/assessments/{assessment['id']}/scores", headers=headers).json()
+    assert len(scores) == 2  # correction updated in place, not a duplicate row
+    by_student = {s["student_id"]: s["score"] for s in scores}
+    assert by_student[s1["id"]] == 15.5
+
+    # Only the assessment's own teacher (or an admin) may delete it.
+    forbidden = client.delete(f"/assessments/{assessment['id']}", headers=headers_other)
+    assert forbidden.status_code == 403
+
+    deleted = client.delete(f"/assessments/{assessment['id']}", headers=headers)
+    assert deleted.status_code == 204
+    after_delete = client.get(f"/classrooms/{classroom['id']}/assessments", params={
+        "subject_id": subject["id"], "term_id": term["id"],
+    }, headers=headers).json()
+    assert after_delete == []
+
+    # And its marks are gone from the council report too, since /council
+    # only ever looks at non-deleted assessments.
+    client.patch(f"/classrooms/{classroom['id']}/homeroom-teacher", json={"homeroom_teacher_id": teacher["id"]}, headers=headers)
+    report = client.get(f"/council/classrooms/{classroom['id']}/report", params={"term_id": term["id"]}, headers=headers).json()
+    row1 = next(r for r in report["rows"] if r["student_id"] == s1["id"])
+    subj_avg = next(sa for sa in row1["subject_averages"] if sa["subject_id"] == subject["id"])
+    assert subj_avg["average"] is None

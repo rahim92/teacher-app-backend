@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import IntegrityError
@@ -23,12 +24,15 @@ from app.schemas.academic import (
     ClassDelegateCreate,
     ClassDelegateRead,
     ClassroomCreate,
+    ClassroomDirectoryEntry,
     ClassroomRead,
     HomeroomTeacherUpdate,
+    MyClassroomRead,
     SchoolCreate,
     SchoolRead,
     SubjectCreate,
     SubjectRead,
+    TaughtSubjectInfo,
     TeacherClassroomAssignmentCreate,
     TeacherClassroomAssignmentRead,
     TermCreate,
@@ -123,9 +127,105 @@ def create_classroom(
 
 @router.get("/classrooms", response_model=list[ClassroomRead])
 def list_classrooms(session: Session = Depends(get_session), current_user: User = Depends(get_current_user)):
+    """Classrooms THIS teacher created in this app -- kept for backward
+    compatibility. To see every classroom a teacher actually teaches in
+    (as homeroom teacher, a subject teacher, or the creator), use
+    /my-classrooms below -- a teacher in a real متوسط school commonly
+    teaches 3-4+ classrooms by subject while creating none of them.
+    """
     return session.exec(
         select(Classroom).where(Classroom.teacher_id == current_user.id, Classroom.is_deleted == False)  # noqa: E712
     ).all()
+
+
+@router.get("/my-classrooms", response_model=list[MyClassroomRead])
+def list_my_classrooms(session: Session = Depends(get_session), current_user: User = Depends(get_current_user)):
+    """Every classroom this teacher has ANY real relation to this year:
+    created it, is its homeroom teacher ('الأستاذ الرئيسي' -- at most one),
+    or teaches a subject in it (TeacherClassroomAssignment -- commonly
+    several). Each result is tagged with that teacher's specific role(s) so
+    the app can show, e.g., '🎓 مسؤول' next to the one homeroom classroom and
+    a subject badge for every other classroom they teach in.
+    """
+    assigned_classroom_ids = set(
+        session.exec(
+            select(TeacherClassroomAssignment.classroom_id).where(
+                TeacherClassroomAssignment.teacher_id == current_user.id,
+                TeacherClassroomAssignment.is_deleted == False,  # noqa: E712
+            )
+        ).all()
+    )
+    classrooms = session.exec(
+        select(Classroom).where(
+            Classroom.is_deleted == False,  # noqa: E712
+            (Classroom.teacher_id == current_user.id)
+            | (Classroom.homeroom_teacher_id == current_user.id)
+            | (Classroom.id.in_(list(assigned_classroom_ids)) if assigned_classroom_ids else (Classroom.id == None))  # noqa: E711
+        )
+    ).all()
+
+    results: list[MyClassroomRead] = []
+    for classroom in classrooms:
+        my_assignments = session.exec(
+            select(TeacherClassroomAssignment, Subject)
+            .join(Subject, Subject.id == TeacherClassroomAssignment.subject_id)
+            .where(
+                TeacherClassroomAssignment.classroom_id == classroom.id,
+                TeacherClassroomAssignment.teacher_id == current_user.id,
+                TeacherClassroomAssignment.is_deleted == False,  # noqa: E712
+            )
+        ).all()
+        homeroom_name = None
+        if classroom.homeroom_teacher_id:
+            homeroom_user = session.get(User, classroom.homeroom_teacher_id)
+            homeroom_name = homeroom_user.full_name if homeroom_user else None
+        results.append(
+            MyClassroomRead(
+                **classroom.model_dump(),
+                is_creator=classroom.teacher_id == current_user.id,
+                is_homeroom=classroom.homeroom_teacher_id == current_user.id,
+                homeroom_teacher_name=homeroom_name,
+                taught_subjects=[
+                    TaughtSubjectInfo(subject_id=subj.id, subject_name=subj.name) for _assign, subj in my_assignments
+                ],
+            )
+        )
+    return results
+
+
+@router.get("/classrooms/directory", response_model=list[ClassroomDirectoryEntry])
+def classroom_directory(
+    academic_year_id: Optional[str] = None,
+    session: Session = Depends(get_session),
+    _: User = Depends(get_current_user),
+):
+    """Every classroom in the school (optionally scoped to one academic
+    year), regardless of who created it -- so a subject teacher can find a
+    classroom a colleague already set up and request a
+    TeacherClassroomAssignment in it, instead of re-creating it. Read-only
+    and open to any authenticated teacher, consistent with the rest of the
+    app's MVP permission model (see e.g. delegates GET).
+    """
+    query = select(Classroom).where(Classroom.is_deleted == False)  # noqa: E712
+    if academic_year_id:
+        query = query.where(Classroom.academic_year_id == academic_year_id)
+    classrooms = session.exec(query).all()
+    entries = []
+    for classroom in classrooms:
+        homeroom_name = None
+        if classroom.homeroom_teacher_id:
+            homeroom_user = session.get(User, classroom.homeroom_teacher_id)
+            homeroom_name = homeroom_user.full_name if homeroom_user else None
+        entries.append(
+            ClassroomDirectoryEntry(
+                id=classroom.id,
+                name=classroom.name,
+                grade_level=classroom.grade_level,
+                academic_year_id=classroom.academic_year_id,
+                homeroom_teacher_name=homeroom_name,
+            )
+        )
+    return entries
 
 
 @router.patch("/classrooms/{classroom_id}/homeroom-teacher", response_model=ClassroomRead)
