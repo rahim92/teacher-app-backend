@@ -432,3 +432,43 @@ def test_term_date_patch_fixes_stale_range_hiding_an_assessment():
     # already-deleted record) 404s instead of silently no-op'ing.
     assert client.patch("/terms/does-not-exist", json={"start_date": "2026-01-01"}, headers=headers).status_code == 404
     assert client.patch("/academic-years/does-not-exist", json={"end_date": "2026-01-01"}, headers=headers).status_code == 404
+
+
+def test_parent_message_template_render_and_delete():
+    """The report/communication screen's own workflow: save a reusable
+    template with placeholders, render it filled in for one student (missing
+    variables stay visible as '{var}' rather than erroring -- see
+    _SafeDict), then delete a wrongly-worded template so it disappears from
+    the teacher's own list. Only the template's own author may delete it.
+    """
+    headers, _ = _register_and_login("msg_t")
+    headers_other, _ = _register_and_login("msg_other")
+
+    created = client.post("/message-templates", json={
+        "title": "تنبيه غياب", "body_template": "السيد(ة) ولي أمر {student_name}، غاب بتاريخ {date}. الغياب: {absences}.",
+        "category": "absence",
+    }, headers=headers)
+    assert created.status_code == 200, created.text
+    template = created.json()
+
+    listing = client.get("/message-templates", headers=headers).json()
+    assert {t["id"] for t in listing} == {template["id"]}
+    # Templates are private per-teacher, not shared.
+    assert client.get("/message-templates", headers=headers_other).json() == []
+
+    rendered = client.post("/message-templates/render", json={
+        "template_id": template["id"], "variables": {"student_name": "أمين بلقاسم", "date": "2026-09-08"},
+    }, headers=headers)
+    assert rendered.status_code == 200, rendered.text
+    text = rendered.json()["text"]
+    assert "أمين بلقاسم" in text and "2026-09-08" in text
+    assert "{absences}" in text  # missing variable left visible, not an error
+
+    # Only the template's own author may delete it.
+    forbidden = client.delete(f"/message-templates/{template['id']}", headers=headers_other)
+    assert forbidden.status_code == 403
+
+    deleted = client.delete(f"/message-templates/{template['id']}", headers=headers)
+    assert deleted.status_code == 204
+    assert client.get("/message-templates", headers=headers).json() == []
+    assert client.delete(f"/message-templates/{template['id']}", headers=headers).status_code == 404
