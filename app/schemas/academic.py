@@ -72,3 +72,15 @@ class TeacherClassroomAssignmentCreate(BaseModel):
 
 class TeacherClassroomAssignmentRead(TeacherClassroomAssignmentCreate):
     id: str
+
+
+class ClassDelegateCreate(BaseModel):
+    classroom_id: str
+    student_id: str
+    academic_year_id: str
+    elected_date: Optional[str] = None
+    note: Optional[str] = None
+
+
+class ClassDelegateRead(ClassDelegateCreate):
+    id: str

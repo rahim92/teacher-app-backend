@@ -6,8 +6,10 @@ from sqlmodel import Session, select
 
 from app.auth import get_current_user
 from app.database import get_session
+from app.models.common import UserRole
 from app.models.identity import (
     AcademicYear,
+    ClassDelegate,
     Classroom,
     School,
     Subject,
@@ -18,6 +20,8 @@ from app.models.identity import (
 from app.schemas.academic import (
     AcademicYearCreate,
     AcademicYearRead,
+    ClassDelegateCreate,
+    ClassDelegateRead,
     ClassroomCreate,
     ClassroomRead,
     HomeroomTeacherUpdate,
@@ -207,3 +211,67 @@ def list_teacher_assignments(
             TeacherClassroomAssignment.is_deleted == False,  # noqa: E712
         )
     ).all()
+
+
+def _ensure_can_manage_delegates(classroom: Classroom, current_user: User) -> None:
+    """Recording a delegate is the homeroom teacher's job (per decision
+    836/39 they supervise the class election and log the result) -- not a
+    thing any subject teacher of the class should be able to overwrite.
+    """
+    is_homeroom_teacher = classroom.homeroom_teacher_id == current_user.id
+    is_admin = current_user.role == UserRole.admin
+    if not (is_homeroom_teacher or is_admin):
+        raise HTTPException(
+            status_code=403,
+            detail="تسجيل نتيجة انتخاب مندوبي القسم متاح فقط للأستاذ الرئيسي لهذا القسم أو للإدارة.",
+        )
+
+
+@router.post("/classrooms/{classroom_id}/delegates", response_model=ClassDelegateRead)
+def add_class_delegate(
+    classroom_id: str,
+    payload: ClassDelegateCreate,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Records the outcome of the class delegate election (مندوبو القسم) --
+    the app never 'appoints' a delegate; it only stores who the class
+    elected, entered by the homeroom teacher who supervised the vote.
+    """
+    if payload.classroom_id != classroom_id:
+        raise HTTPException(status_code=400, detail="معرّف القسم غير متطابق")
+    classroom = session.get(Classroom, classroom_id)
+    if not classroom or classroom.is_deleted:
+        raise HTTPException(status_code=404, detail="القسم غير موجود")
+    _ensure_can_manage_delegates(classroom, current_user)
+
+    delegate = ClassDelegate(**payload.model_dump())
+    session.add(delegate)
+    session.commit()
+    session.refresh(delegate)
+    return delegate
+
+
+@router.get("/classrooms/{classroom_id}/delegates", response_model=list[ClassDelegateRead])
+def list_class_delegates(classroom_id: str, session: Session = Depends(get_session), _: User = Depends(get_current_user)):
+    """Read-only for every teacher assigned to the classroom (and beyond --
+    MVP keeps GETs open to any authenticated teacher like the rest of the
+    app; only the write side is restricted). This is the whole point of the
+    feature: every subject teacher should know who the class's delegates are.
+    """
+    return session.exec(
+        select(ClassDelegate).where(ClassDelegate.classroom_id == classroom_id, ClassDelegate.is_deleted == False)  # noqa: E712
+    ).all()
+
+
+@router.delete("/class-delegates/{delegate_id}", status_code=204)
+def remove_class_delegate(delegate_id: str, session: Session = Depends(get_session), current_user: User = Depends(get_current_user)):
+    delegate = session.get(ClassDelegate, delegate_id)
+    if not delegate or delegate.is_deleted:
+        raise HTTPException(status_code=404, detail="المندوب غير موجود")
+    classroom = session.get(Classroom, delegate.classroom_id)
+    _ensure_can_manage_delegates(classroom, current_user)
+    delegate.is_deleted = True
+    delegate.updated_at = datetime.utcnow()
+    session.add(delegate)
+    session.commit()

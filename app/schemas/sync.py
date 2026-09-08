@@ -24,6 +24,7 @@ SyncEntityName = Literal[
     "remediation_participants",
     "parent_message_templates",
     "notebook_checks",
+    "class_delegates",
 ]
 
 

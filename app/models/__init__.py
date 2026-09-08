@@ -11,6 +11,7 @@ from app.models.assessment import (  # noqa: F401
 from app.models.curriculum import AnnualPlan, CurriculumUnit, PlanItem  # noqa: F401
 from app.models.identity import (  # noqa: F401
     AcademicYear,
+    ClassDelegate,
     Classroom,
     School,
     Subject,
@@ -20,4 +21,4 @@ from app.models.identity import (  # noqa: F401
 )
 from app.models.messaging import ParentMessageTemplate  # noqa: F401
 from app.models.session import ClassSession, LessonLog, SessionEvent  # noqa: F401
-from app.models.student import NotebookCheck, SeatAssignment, Student  # noqa: F401
+from app.models.student import NotebookCheck, SeatAssignment, Student, StudentSpecialNeed  # noqa: F401

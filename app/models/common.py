@@ -74,6 +74,15 @@ class SessionEventType(str, Enum):
     homework_done = "homework_done"
     homework_missing = "homework_missing"
     participation = "participation"
+    # Added to mirror the official "علامة السلوك" /20 rubric categories
+    # (إحضار الأدوات، العمل الجماعي، المبادرة والمساهمة) so the continuous
+    # taps a teacher already makes can feed BehaviorScore's computation
+    # instead of the teacher tallying these by hand. See routers/behavior.py.
+    equipment_brought = "equipment_brought"
+    equipment_missing = "equipment_missing"
+    teamwork_positive = "teamwork_positive"
+    teamwork_negative = "teamwork_negative"
+    initiative_shown = "initiative_shown"
 
 
 class MessageCategory(str, Enum):
@@ -92,3 +101,29 @@ class NotebookQuality(str, Enum):
     organized = "organized"  # منظم
     average = "average"  # متوسط
     neglected = "neglected"  # مهمل
+
+
+class SpecialNeedCategory(str, Enum):
+    """Deliberately split 'إعاقة ذهنية' (intellectual disability) from
+    'صعوبات تعلم' (specific learning difficulty, e.g. dyslexia) -- they are
+    pedagogically different and lumping them under one outdated label
+    ("تأخر عقلي") both stigmatizes and loses the distinction a teacher
+    actually needs to act on.
+    """
+
+    chronic_illness = "chronic_illness"  # مرض مزمن
+    visual_impairment = "visual_impairment"  # إعاقة بصرية
+    hearing_impairment = "hearing_impairment"  # إعاقة سمعية
+    physical_disability = "physical_disability"  # إعاقة حركية
+    intellectual_disability = "intellectual_disability"  # إعاقة ذهنية
+    learning_difficulty = "learning_difficulty"  # صعوبات تعلم
+    other = "other"  # أخرى
+
+
+class SpecialNeedVisibility(str, Enum):
+    """Who besides the homeroom teacher/admin can see this entry. Defaults
+    to the restrictive option -- a teacher must deliberately widen it.
+    """
+
+    homeroom_only = "homeroom_only"
+    shared_with_teachers = "shared_with_teachers"

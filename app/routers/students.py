@@ -1,12 +1,14 @@
 from datetime import datetime
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
 from app.auth import get_current_user
 from app.database import get_session
-from app.models.identity import User
-from app.models.student import NotebookCheck, SeatAssignment, Student
+from app.models.common import SpecialNeedVisibility, UserRole
+from app.models.identity import Classroom, TeacherClassroomAssignment, User
+from app.models.student import NotebookCheck, SeatAssignment, Student, StudentSpecialNeed
 from app.schemas.student import (
     NotebookCheckCreate,
     NotebookCheckRead,
@@ -14,6 +16,8 @@ from app.schemas.student import (
     SeatAssignmentUpsert,
     StudentCreate,
     StudentRead,
+    StudentSpecialNeedCreate,
+    StudentSpecialNeedRead,
     StudentUpdate,
 )
 
@@ -75,6 +79,7 @@ def upsert_seat_assignment(
             SeatAssignment.teacher_id == current_user.id,
             SeatAssignment.classroom_id == payload.classroom_id,
             SeatAssignment.student_id == payload.student_id,
+            SeatAssignment.term_id == payload.term_id,
             SeatAssignment.is_deleted == False,  # noqa: E712
         )
     ).first()
@@ -82,6 +87,7 @@ def upsert_seat_assignment(
     if existing:
         existing.seat_row = payload.seat_row
         existing.seat_col = payload.seat_col
+        existing.reason = payload.reason
         existing.updated_at = datetime.utcnow()
         seat = existing
     else:
@@ -96,16 +102,20 @@ def upsert_seat_assignment(
 @router.get("/classrooms/{classroom_id}/seat-assignments", response_model=list[SeatAssignmentRead])
 def list_seat_assignments(
     classroom_id: str,
+    term_id: Optional[str] = None,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    return session.exec(
-        select(SeatAssignment).where(
-            SeatAssignment.classroom_id == classroom_id,
-            SeatAssignment.teacher_id == current_user.id,
-            SeatAssignment.is_deleted == False,  # noqa: E712
-        )
-    ).all()
+    query = select(SeatAssignment).where(
+        SeatAssignment.classroom_id == classroom_id,
+        SeatAssignment.teacher_id == current_user.id,
+        SeatAssignment.is_deleted == False,  # noqa: E712
+    )
+    # term_id omitted -> every map this teacher has for the classroom
+    # (standing + any per-term ones); pass it to scope to one term/standing.
+    if term_id is not None:
+        query = query.where(SeatAssignment.term_id == term_id)
+    return session.exec(query).all()
 
 
 @router.post("/notebook-checks", response_model=NotebookCheckRead)
@@ -122,6 +132,70 @@ def create_notebook_check(
     session.commit()
     session.refresh(check)
     return check
+
+
+def _teacher_relation_to_classroom(classroom: Classroom, current_user: User, session: Session) -> str:
+    """Returns 'homeroom' (or admin), 'assigned', or 'none' -- what
+    StudentSpecialNeed visibility filtering keys off. Kept separate from
+    council's stricter all-or-nothing check because special-need entries
+    have their own per-row visibility instead of an endpoint-wide gate.
+    """
+    if current_user.role == UserRole.admin or classroom.homeroom_teacher_id == current_user.id:
+        return "homeroom"
+    assigned = session.exec(
+        select(TeacherClassroomAssignment).where(
+            TeacherClassroomAssignment.classroom_id == classroom.id,
+            TeacherClassroomAssignment.teacher_id == current_user.id,
+            TeacherClassroomAssignment.is_deleted == False,  # noqa: E712
+        )
+    ).first()
+    return "assigned" if assigned else "none"
+
+
+@router.post("/student-special-needs", response_model=StudentSpecialNeedRead)
+def add_special_need(
+    payload: StudentSpecialNeedCreate,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Records a condition the teacher must be considerate of. `visibility`
+    defaults to homeroom_only (see the schema) -- a teacher must
+    deliberately widen it to shared_with_teachers for the classroom-wide
+    accommodation notice (e.g. front-row seating) to reach every subject
+    teacher. This is sensitive health/disability data about a minor: kept
+    out of the generic /sync entity map on purpose so it's never silently
+    bulk-pulled -- always fetched explicitly per student.
+    """
+    need = StudentSpecialNeed(**payload.model_dump(), created_by=current_user.id)
+    session.add(need)
+    session.commit()
+    session.refresh(need)
+    return need
+
+
+@router.get("/students/{student_id}/special-needs", response_model=list[StudentSpecialNeedRead])
+def list_special_needs(student_id: str, session: Session = Depends(get_session), current_user: User = Depends(get_current_user)):
+    student = session.get(Student, student_id)
+    if not student or student.is_deleted:
+        raise HTTPException(status_code=404, detail="التلميذ غير موجود")
+    classroom = session.get(Classroom, student.classroom_id)
+    relation = _teacher_relation_to_classroom(classroom, current_user, session)
+    if relation == "none":
+        raise HTTPException(
+            status_code=403,
+            detail="لا يمكن الاطلاع على الحالات الخاصة لتلميذ في قسم لست أستاذاً فيه.",
+        )
+
+    rows = session.exec(
+        select(StudentSpecialNeed).where(
+            StudentSpecialNeed.student_id == student_id, StudentSpecialNeed.is_deleted == False  # noqa: E712
+        )
+    ).all()
+    if relation == "homeroom":
+        return rows
+    # a subject teacher who isn't homeroom only sees the deliberately-shared,
+    # actionable entries -- never the fuller clinical picture.
+    return [r for r in rows if r.visibility == SpecialNeedVisibility.shared_with_teachers]
 
 
 @router.get("/students/{student_id}/notebook-checks", response_model=list[NotebookCheckRead])

@@ -2,7 +2,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from app.models.common import NotebookQuality
+from app.models.common import NotebookQuality, SpecialNeedCategory, SpecialNeedVisibility
 
 
 class StudentCreate(BaseModel):
@@ -44,13 +44,29 @@ class StudentRead(BaseModel):
 class SeatAssignmentUpsert(BaseModel):
     classroom_id: str
     student_id: str
+    term_id: Optional[str] = None
     seat_row: int
     seat_col: int
+    reason: Optional[str] = None
 
 
 class SeatAssignmentRead(SeatAssignmentUpsert):
     id: str
     teacher_id: str
+
+
+class StudentSpecialNeedCreate(BaseModel):
+    student_id: str
+    category: SpecialNeedCategory
+    description: Optional[str] = None
+    accommodation_needed: Optional[str] = None
+    emergency_protocol: Optional[str] = None
+    visibility: SpecialNeedVisibility = SpecialNeedVisibility.homeroom_only
+
+
+class StudentSpecialNeedRead(StudentSpecialNeedCreate):
+    id: str
+    created_by: str
 
 
 class NotebookCheckCreate(BaseModel):

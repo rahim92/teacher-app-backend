@@ -26,7 +26,7 @@ from app.models.assessment import (
     RemediationSession,
 )
 from app.models.curriculum import AnnualPlan, PlanItem
-from app.models.identity import User
+from app.models.identity import ClassDelegate, User
 from app.models.messaging import ParentMessageTemplate
 from app.models.session import ClassSession, LessonLog, SessionEvent
 from app.models.student import NotebookCheck, SeatAssignment, Student
@@ -58,6 +58,11 @@ ENTITY_MODEL_MAP: dict[str, Type[SQLModel]] = {
     "remediation_participants": RemediationParticipant,
     "parent_message_templates": ParentMessageTemplate,
     "notebook_checks": NotebookCheck,
+    "class_delegates": ClassDelegate,
+    # StudentSpecialNeed is deliberately NOT synced generically -- it's
+    # sensitive health/disability data about a minor with its own
+    # per-row visibility rule (see routers/students.py), always fetched
+    # explicitly per student rather than bulk-pulled like everything else.
 }
 
 # Fields the client is never allowed to set directly (server-controlled or

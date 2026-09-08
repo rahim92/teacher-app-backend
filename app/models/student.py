@@ -2,7 +2,7 @@ from typing import Optional
 
 from sqlmodel import Field
 
-from app.models.common import NotebookQuality, SyncableModel
+from app.models.common import NotebookQuality, SpecialNeedCategory, SpecialNeedVisibility, SyncableModel
 
 
 class Student(SyncableModel, table=True):
@@ -22,6 +22,14 @@ class Student(SyncableModel, table=True):
 class SeatAssignment(SyncableModel, table=True):
     """Seating position is per-teacher, not a fixed student attribute --
     different subject teachers commonly arrange the same classroom differently.
+
+    `term_id` is optional (None = "the standing arrangement") so a teacher
+    who never bothers with per-term seating still gets simple single-map
+    behaviour, while one who rotates seats each term (a documented real
+    practice -- front-row rotation, vision/hearing needs, behaviour-based
+    regrouping) can hold one map per term without them overwriting each
+    other. `reason` records *why*, mostly to justify the arrangement later
+    (a recurring friction point -- see docs/data_model.md).
     """
 
     __tablename__ = "seat_assignments"
@@ -29,8 +37,10 @@ class SeatAssignment(SyncableModel, table=True):
     teacher_id: str = Field(foreign_key="users.id", index=True)
     classroom_id: str = Field(foreign_key="classrooms.id", index=True)
     student_id: str = Field(foreign_key="students.id", index=True)
+    term_id: Optional[str] = Field(default=None, foreign_key="terms.id", index=True)
     seat_row: int
     seat_col: int
+    reason: Optional[str] = None
 
 
 class NotebookCheck(SyncableModel, table=True):
@@ -46,3 +56,25 @@ class NotebookCheck(SyncableModel, table=True):
     check_date: str
     quality: NotebookQuality
     note: Optional[str] = None
+
+
+class StudentSpecialNeed(SyncableModel, table=True):
+    """A student condition the teacher must be considerate of -- chronic
+    illness, sensory/physical/intellectual disability, or a specific
+    learning difficulty. Deliberately NOT folded into Student.medical_notes
+    free text: `visibility` is what lets the app share the *actionable*
+    part (accommodation_needed) with every teacher of the classroom while
+    keeping the fuller clinical picture restricted to the homeroom teacher
+    and admin by default -- see docs/data_model.md and the router's
+    permission check for the exact rule.
+    """
+
+    __tablename__ = "student_special_needs"
+
+    student_id: str = Field(foreign_key="students.id", index=True)
+    category: SpecialNeedCategory
+    description: Optional[str] = None
+    accommodation_needed: Optional[str] = None  # e.g. "يحتاج مقعداً أمامياً"
+    emergency_protocol: Optional[str] = None  # e.g. "يحمل جهاز استنشاق للربو"
+    visibility: SpecialNeedVisibility = Field(default=SpecialNeedVisibility.homeroom_only)
+    created_by: str = Field(foreign_key="users.id")

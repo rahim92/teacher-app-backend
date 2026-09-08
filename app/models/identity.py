@@ -102,3 +102,21 @@ class TeacherClassroomAssignment(SyncableModel, table=True):
     classroom_id: str = Field(foreign_key="classrooms.id", index=True)
     subject_id: str = Field(foreign_key="subjects.id")
     academic_year_id: str = Field(foreign_key="academic_years.id")
+
+
+class ClassDelegate(SyncableModel, table=True):
+    """A student elected as 'مندوب القسم'. Per ministerial decision 836/39,
+    a class elects THREE delegates by student vote (the homeroom teacher
+    supervises the election and records the result here -- the app never
+    frames this as the teacher 'appointing' them). Visible read-only to
+    every teacher assigned to the classroom; only the homeroom teacher/admin
+    may record or remove one (enforced in the router).
+    """
+
+    __tablename__ = "class_delegates"
+
+    classroom_id: str = Field(foreign_key="classrooms.id", index=True)
+    student_id: str = Field(foreign_key="students.id", index=True)
+    academic_year_id: str = Field(foreign_key="academic_years.id")
+    elected_date: Optional[str] = None
+    note: Optional[str] = None
