@@ -21,6 +21,7 @@ from app.models.identity import (
 from app.schemas.academic import (
     AcademicYearCreate,
     AcademicYearRead,
+    AcademicYearUpdate,
     ClassDelegateCreate,
     ClassDelegateRead,
     ClassroomCreate,
@@ -37,6 +38,7 @@ from app.schemas.academic import (
     TeacherClassroomAssignmentRead,
     TermCreate,
     TermRead,
+    TermUpdate,
 )
 
 router = APIRouter(tags=["academic"])
@@ -74,11 +76,66 @@ def list_academic_years(session: Session = Depends(get_session), _: User = Depen
     return session.exec(select(AcademicYear).where(AcademicYear.is_deleted == False)).all()  # noqa: E712
 
 
+@router.patch("/academic-years/{year_id}", response_model=AcademicYearRead)
+def update_academic_year(
+    year_id: str,
+    payload: AcademicYearUpdate,
+    session: Session = Depends(get_session),
+    _: User = Depends(get_current_user),
+):
+    """Corrects a school year's own date range (label/start_date/end_date) --
+    most commonly needed when a year was created with a stale default range
+    (e.g. rolled over from last year's dates) that no longer brackets the
+    real current date. MVP: open to any authenticated teacher, like the rest
+    of academic setup.
+    """
+    year = session.get(AcademicYear, year_id)
+    if not year or year.is_deleted:
+        raise HTTPException(status_code=404, detail="السنة الدراسية غير موجودة")
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(year, field, value)
+    year.updated_at = datetime.utcnow()
+    session.add(year)
+    session.commit()
+    session.refresh(year)
+    return year
+
+
 @router.post("/terms", response_model=TermRead)
 def create_term(payload: TermCreate, session: Session = Depends(get_session), _: User = Depends(get_current_user)):
     """A trimester/semester -- council reports and grade averages are always
     computed for one term (see /council)."""
     term = Term(**payload.model_dump())
+    session.add(term)
+    session.commit()
+    session.refresh(term)
+    return term
+
+
+@router.patch("/terms/{term_id}", response_model=TermRead)
+def update_term(
+    term_id: str,
+    payload: TermUpdate,
+    session: Session = Depends(get_session),
+    _: User = Depends(get_current_user),
+):
+    """Corrects a term's date range after the fact. This matters beyond
+    cosmetics: a term's [start_date, end_date] gates whether anything
+    recorded for it is ever found again -- grade entry's "افتح فرضاً
+    مسجَّلاً" picker and /council both filter assessments by
+    `term.start_date <= assessment.date <= term.end_date`, and
+    /seat-assignments filters the same way by term_id. A term stuck with a
+    stale range (e.g. defaulted to last year's dates) silently hides
+    everything dated in the real current year from those views, with no
+    error -- so unlike most records here, this one needs to be fixable
+    in place, not just re-creatable.
+    """
+    term = session.get(Term, term_id)
+    if not term or term.is_deleted:
+        raise HTTPException(status_code=404, detail="الفصل الدراسي غير موجود")
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(term, field, value)
+    term.updated_at = datetime.utcnow()
     session.add(term)
     session.commit()
     session.refresh(term)

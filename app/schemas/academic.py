@@ -24,6 +24,15 @@ class AcademicYearRead(AcademicYearCreate):
     id: str
 
 
+class AcademicYearUpdate(BaseModel):
+    """Partial update -- e.g. correcting a year created with a stale default
+    date range (only fields actually sent are changed)."""
+
+    label: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+
+
 class TermCreate(BaseModel):
     academic_year_id: str
     label: str
@@ -34,6 +43,15 @@ class TermCreate(BaseModel):
 
 class TermRead(TermCreate):
     id: str
+
+
+class TermUpdate(BaseModel):
+    """Partial update -- same rationale as AcademicYearUpdate above."""
+
+    label: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    order_index: Optional[int] = None
 
 
 class SubjectCreate(BaseModel):

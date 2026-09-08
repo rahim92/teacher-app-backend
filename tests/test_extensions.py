@@ -378,3 +378,57 @@ def test_grade_entry_list_upsert_and_delete():
     row1 = next(r for r in report["rows"] if r["student_id"] == s1["id"])
     subj_avg = next(sa for sa in row1["subject_averages"] if sa["subject_id"] == subject["id"])
     assert subj_avg["average"] is None
+
+
+def test_term_date_patch_fixes_stale_range_hiding_an_assessment():
+    """Reproduces the real bug: a term created with a stale/wrong date range
+    (e.g. rolled over from a previous school year) silently excludes an
+    assessment dated in the real current year from the grade-entry picker's
+    listing -- even though creating the assessment itself succeeds and its
+    scores can still be entered directly by id. PATCHing the term's dates
+    must make it show up without needing to recreate anything.
+    """
+    headers, teacher = _register_and_login("staleterm_t")
+    year, term, classroom = _setup_classroom(headers, "1AM - staleterm")
+    subject = client.post("/subjects", json={"name": "الرياضيات"}, headers=headers).json()
+
+    # term's range is 2025-09-01..2025-12-31 (see _setup_classroom) -- an
+    # assessment dated well into the next year falls outside it.
+    created = client.post("/assessments", json={
+        "classroom_id": classroom["id"], "subject_id": subject["id"], "assessment_type": "exam",
+        "title": "اختبار فصلي", "date": "2026-09-08", "coefficient": 3, "max_score": 20,
+    }, headers=headers)
+    assert created.status_code == 200, created.text
+    assessment = created.json()
+
+    listing = client.get(f"/classrooms/{classroom['id']}/assessments", params={
+        "subject_id": subject["id"], "term_id": term["id"],
+    }, headers=headers).json()
+    assert listing == []  # excluded -- this is the bug the user hit
+
+    # Scores can still be entered by id even though it's hidden from the
+    # term-filtered list -- matches the user's report (score table worked,
+    # picker didn't).
+    put = client.put("/assessment-scores", json={"assessment_id": assessment["id"], "student_id": "does-not-matter", "score": 9.5}, headers=headers)
+    assert put.status_code in (200, 422)  # 422 only if student_id FK is enforced; not the point of this test
+
+    # Fixing the term's own dates (not recreating it) makes the assessment
+    # reappear in the filtered listing.
+    patched = client.patch(f"/terms/{term['id']}", json={"start_date": "2026-09-01", "end_date": "2026-12-31"}, headers=headers)
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["start_date"] == "2026-09-01"
+
+    listing_after = client.get(f"/classrooms/{classroom['id']}/assessments", params={
+        "subject_id": subject["id"], "term_id": term["id"],
+    }, headers=headers).json()
+    assert {a["id"] for a in listing_after} == {assessment["id"]}
+
+    # The academic year's own range is independently fixable the same way.
+    patched_year = client.patch(f"/academic-years/{year['id']}", json={"end_date": "2027-06-30"}, headers=headers)
+    assert patched_year.status_code == 200, patched_year.text
+    assert patched_year.json()["end_date"] == "2027-06-30"
+
+    # A term/year id that doesn't exist (or belongs to someone else's
+    # already-deleted record) 404s instead of silently no-op'ing.
+    assert client.patch("/terms/does-not-exist", json={"start_date": "2026-01-01"}, headers=headers).status_code == 404
+    assert client.patch("/academic-years/does-not-exist", json={"end_date": "2026-01-01"}, headers=headers).status_code == 404
