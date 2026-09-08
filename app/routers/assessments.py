@@ -33,6 +33,25 @@ from app.schemas.assessment import (
 router = APIRouter(tags=["assessments"])
 
 
+def _ensure_owns_assessment(assessment: Assessment, current_user: User) -> None:
+    """Same rule `delete_assessment` already enforces (teacher_id match or
+    admin), reused here because a review pass found the score/detail
+    endpoints below never even fetched the Assessment row, let alone
+    checked who created it -- so any authenticated teacher could enter or
+    overwrite grades on another teacher's test/exam.
+    """
+    if assessment.teacher_id != current_user.id and current_user.role != UserRole.admin:
+        raise HTTPException(status_code=403, detail="يمكن فقط لصاحب الفرض أو الإدارة إدخال/تعديل علاماته.")
+
+
+def _get_owned_assessment(session: Session, assessment_id: str, current_user: User) -> Assessment:
+    assessment = session.get(Assessment, assessment_id)
+    if not assessment or assessment.is_deleted:
+        raise HTTPException(status_code=404, detail="الفرض/الاختبار غير موجود")
+    _ensure_owns_assessment(assessment, current_user)
+    return assessment
+
+
 @router.post("/assessments", response_model=AssessmentRead)
 def create_assessment(
     payload: AssessmentCreate,
@@ -50,7 +69,7 @@ def create_assessment(
 def add_assessment_score(
     payload: AssessmentScoreCreate,
     session: Session = Depends(get_session),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """The student's overall grade on this assessment -- what subject/term/
     council averages are computed from (see /council). Separate from the
@@ -61,6 +80,7 @@ def add_assessment_score(
     callers -- the grade-entry screen uses the upsert-friendly PUT below
     instead, so a teacher revising an already-entered mark doesn't hit that.
     """
+    _get_owned_assessment(session, payload.assessment_id, current_user)
     score = AssessmentScore(**payload.model_dump())
     session.add(score)
     session.commit()
@@ -72,13 +92,14 @@ def add_assessment_score(
 def upsert_assessment_score(
     payload: AssessmentScoreCreate,
     session: Session = Depends(get_session),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Create-or-update by (assessment_id, student_id) -- same upsert-by-
     natural-key pattern as /seat-assignments -- so the grade-entry table can
     call this every time a score is entered OR corrected, without needing a
     separate "does a score already exist" lookup or a per-row PATCH id.
     """
+    _get_owned_assessment(session, payload.assessment_id, current_user)
     existing = session.exec(
         select(AssessmentScore).where(
             AssessmentScore.assessment_id == payload.assessment_id,
@@ -139,11 +160,7 @@ def delete_assessment(
     unreachable in every app view in practice, since both the grade-entry
     list and /council reach scores only through non-deleted assessments.
     """
-    assessment = session.get(Assessment, assessment_id)
-    if not assessment or assessment.is_deleted:
-        raise HTTPException(status_code=404, detail="الفرض/الاختبار غير موجود")
-    if assessment.teacher_id != current_user.id and current_user.role != UserRole.admin:
-        raise HTTPException(status_code=403, detail="يمكن فقط لصاحب الفرض أو الإدارة حذفه.")
+    assessment = _get_owned_assessment(session, assessment_id, current_user)
     assessment.is_deleted = True
     assessment.updated_at = datetime.utcnow()
     session.add(assessment)
@@ -163,8 +180,9 @@ def list_assessment_scores(assessment_id: str, session: Session = Depends(get_se
 def add_assessment_detail(
     payload: AssessmentDetailCreate,
     session: Session = Depends(get_session),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
+    _get_owned_assessment(session, payload.assessment_id, current_user)
     detail = AssessmentDetail(**payload.model_dump())
     session.add(detail)
     session.commit()
@@ -176,13 +194,14 @@ def add_assessment_detail(
 def upsert_assessment_detail(
     payload: AssessmentDetailCreate,
     session: Session = Depends(get_session),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Create-or-update by (assessment_id, student_id, curriculum_unit_id) --
     same upsert pattern as /assessment-scores -- so the diagnostic-marking
     screen can call this every time a mastery level is set OR corrected for
     one student on one skill, without a separate existence check first.
     """
+    _get_owned_assessment(session, payload.assessment_id, current_user)
     existing = session.exec(
         select(AssessmentDetail).where(
             AssessmentDetail.assessment_id == payload.assessment_id,

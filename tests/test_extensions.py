@@ -750,3 +750,65 @@ def test_cross_teacher_authorization_gaps():
     assert client.patch(f"/remediation-participants/{participant['id']}", json={"after_level": "acquired"}, headers=headers_b).status_code == 403
     owner_update = client.patch(f"/remediation-participants/{participant['id']}", json={"after_level": "acquired"}, headers=headers_a)
     assert owner_update.status_code == 200, owner_update.text
+
+
+def test_assessment_score_ownership_and_self_assign_rule():
+    """Two more gaps found in the same review pass:
+
+    1. /assessment-scores and /assessment-details (both the plain POST and
+       the upsert-friendly PUT) never even fetched the Assessment row, let
+       alone checked who created it -- any authenticated teacher could enter
+       or overwrite grades on another teacher's test/exam. Fixed by reusing
+       the same ownership rule /assessments delete already enforced.
+    2. /teacher-classroom-assignments originally had NO check, which a first
+       fix over-corrected to "must be self" -- breaking the real,
+       already-tested pattern where a classroom's homeroom teacher registers
+       OTHER subject teachers (see test_special_need_visibility_levels). The
+       final rule allows either self-assignment OR the classroom's own
+       manager (creator/homeroom teacher) assigning someone else -- and
+       still rejects a totally unrelated teacher doing either.
+    """
+    headers_a, teacher_a = _register_and_login("scoreowner")
+    headers_b, teacher_b = _register_and_login("scorestranger")
+    year, _term, classroom = _setup_classroom(headers_a, "1AM - scoreauthz")
+    subject = client.post("/subjects", json={"name": "الفيزياء"}, headers=headers_a).json()
+    student = client.post(
+        "/students", json={"classroom_id": classroom["id"], "first_name": "كريم", "last_name": "حداد"}, headers=headers_a
+    ).json()
+    assessment = client.post("/assessments", json={
+        "classroom_id": classroom["id"], "subject_id": subject["id"], "assessment_type": "test",
+        "title": "فرض", "date": "2026-09-10", "coefficient": 1, "max_score": 20,
+    }, headers=headers_a).json()
+
+    # An unrelated teacher can't enter or upsert a score on someone else's assessment.
+    assert client.post("/assessment-scores", json={
+        "assessment_id": assessment["id"], "student_id": student["id"], "score": 15,
+    }, headers=headers_b).status_code == 403
+    assert client.put("/assessment-scores", json={
+        "assessment_id": assessment["id"], "student_id": student["id"], "score": 15,
+    }, headers=headers_b).status_code == 403
+    # The assessment's own teacher still can.
+    own_score = client.put("/assessment-scores", json={
+        "assessment_id": assessment["id"], "student_id": student["id"], "score": 15,
+    }, headers=headers_a)
+    assert own_score.status_code == 200, own_score.text
+
+    unit = client.post("/curriculum-units", json={
+        "subject_id": subject["id"], "grade_level": "1AM", "title": "الحركة", "unit_type": "unit", "order_index": 1, "year_version": "2026-2027",
+    }, headers=headers_a).json()
+    assert client.put("/assessment-details", json={
+        "assessment_id": assessment["id"], "student_id": student["id"], "curriculum_unit_id": unit["id"], "mastery_level": "acquired",
+    }, headers=headers_b).status_code == 403
+
+    # A stranger self-joining is fine (the real self-join flow)...
+    headers_c, teacher_c = _register_and_login("scoreselfjoin")
+    self_join = client.post("/teacher-classroom-assignments", json={
+        "teacher_id": teacher_c["id"], "classroom_id": classroom["id"], "subject_id": subject["id"], "academic_year_id": year["id"],
+    }, headers=headers_c)
+    assert self_join.status_code == 200, self_join.text
+    # ...but a stranger assigning a DIFFERENT unrelated teacher is not.
+    headers_d, teacher_d = _register_and_login("scorenotmanager")
+    not_manager_assign = client.post("/teacher-classroom-assignments", json={
+        "teacher_id": teacher_d["id"], "classroom_id": classroom["id"], "subject_id": subject["id"], "academic_year_id": year["id"],
+    }, headers=headers_b)
+    assert not_manager_assign.status_code == 403

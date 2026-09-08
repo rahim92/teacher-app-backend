@@ -351,13 +351,34 @@ def set_homeroom_teacher(
 def assign_teacher_to_classroom(
     payload: TeacherClassroomAssignmentCreate,
     session: Session = Depends(get_session),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Records 'this teacher teaches this subject in this classroom, this
     year' -- a teacher naturally accumulates many of these (they teach
     several classrooms); nothing limits that. Only the homeroom-teacher role
     above is capped at one.
+
+    Ownership check added during a review pass -- this endpoint used to
+    accept `teacher_id` as plain payload data with no check at all, so any
+    authenticated teacher could assign a DIFFERENT teacher's account to any
+    classroom they have nothing to do with. Two legitimate patterns both
+    need to keep working, though: a teacher self-joining a classroom (both
+    frontend call sites -- creating a new classroom, and joining an existing
+    one from the directory -- pass `teacher_id: S.me.id`), AND a classroom's
+    own manager (creator or homeroom teacher) setting up which OTHER
+    teachers teach which subject there, exactly like
+    test_special_need_visibility_levels already exercises via a homeroom
+    teacher registering a separate subject teacher. So the rule is: either
+    you're assigning yourself, or you already manage this classroom.
     """
+    classroom = session.get(Classroom, payload.classroom_id)
+    if not classroom or classroom.is_deleted:
+        raise HTTPException(status_code=404, detail="القسم غير موجود")
+    is_self = payload.teacher_id == current_user.id
+    is_manager = classroom.teacher_id == current_user.id or classroom.homeroom_teacher_id == current_user.id
+    is_admin = current_user.role == UserRole.admin
+    if not (is_self or is_manager or is_admin):
+        raise HTTPException(status_code=403, detail="لا يمكن لأستاذ تسجيل أستاذ آخر كمُدرِّس في قسم لا يُديره.")
     assignment = TeacherClassroomAssignment(**payload.model_dump())
     session.add(assignment)
     try:
