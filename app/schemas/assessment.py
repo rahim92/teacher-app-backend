@@ -63,3 +63,12 @@ class RemediationParticipantCreate(BaseModel):
 
 class RemediationParticipantRead(RemediationParticipantCreate):
     id: str
+
+
+class RemediationParticipantUpdate(BaseModel):
+    """Records the follow-up outcome once it's known -- separate from
+    creation because `after_level` is by nature knowable only some time
+    after the remediation session itself (a later re-test), not at the
+    moment the session/group is formed."""
+
+    after_level: MasteryLevel

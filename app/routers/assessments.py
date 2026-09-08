@@ -15,6 +15,7 @@ from app.models.assessment import (
 )
 from app.models.common import MasteryLevel, UserRole
 from app.models.identity import Term, User
+from app.models.student import Student
 from app.schemas.assessment import (
     AssessmentCreate,
     AssessmentDetailCreate,
@@ -24,6 +25,7 @@ from app.schemas.assessment import (
     AssessmentScoreRead,
     RemediationParticipantCreate,
     RemediationParticipantRead,
+    RemediationParticipantUpdate,
     RemediationSessionCreate,
     RemediationSessionRead,
 )
@@ -170,6 +172,56 @@ def add_assessment_detail(
     return detail
 
 
+@router.put("/assessment-details", response_model=AssessmentDetailRead)
+def upsert_assessment_detail(
+    payload: AssessmentDetailCreate,
+    session: Session = Depends(get_session),
+    _: User = Depends(get_current_user),
+):
+    """Create-or-update by (assessment_id, student_id, curriculum_unit_id) --
+    same upsert pattern as /assessment-scores -- so the diagnostic-marking
+    screen can call this every time a mastery level is set OR corrected for
+    one student on one skill, without a separate existence check first.
+    """
+    existing = session.exec(
+        select(AssessmentDetail).where(
+            AssessmentDetail.assessment_id == payload.assessment_id,
+            AssessmentDetail.student_id == payload.student_id,
+            AssessmentDetail.curriculum_unit_id == payload.curriculum_unit_id,
+            AssessmentDetail.is_deleted == False,  # noqa: E712
+        )
+    ).first()
+    if existing:
+        existing.mastery_level = payload.mastery_level
+        existing.numeric_score = payload.numeric_score
+        existing.updated_at = datetime.utcnow()
+        detail = existing
+    else:
+        detail = AssessmentDetail(**payload.model_dump())
+    session.add(detail)
+    session.commit()
+    session.refresh(detail)
+    return detail
+
+
+@router.get("/assessments/{assessment_id}/details", response_model=list[AssessmentDetailRead])
+def list_assessment_details(
+    assessment_id: str,
+    curriculum_unit_id: Optional[str] = None,
+    session: Session = Depends(get_session),
+    _: User = Depends(get_current_user),
+):
+    """What the diagnostic-marking screen loads to prefill mastery levels
+    already set for this assessment, so re-opening it doesn't start blank.
+    """
+    query = select(AssessmentDetail).where(
+        AssessmentDetail.assessment_id == assessment_id, AssessmentDetail.is_deleted == False  # noqa: E712
+    )
+    if curriculum_unit_id:
+        query = query.where(AssessmentDetail.curriculum_unit_id == curriculum_unit_id)
+    return session.exec(query).all()
+
+
 @router.get("/curriculum-units/{unit_id}/struggling-students")
 def struggling_students(
     unit_id: str,
@@ -177,14 +229,28 @@ def struggling_students(
     session: Session = Depends(get_session),
     _: User = Depends(get_current_user),
 ):
-    """The diagnostic alert: students whose most recent assessment on this
-    skill/unit is `not_acquired`. Feeds directly into forming a remediation
-    group (Module 3's core value proposition).
+    """The diagnostic alert: students (of THIS classroom specifically) whose
+    most recent mark on this skill/unit is `not_acquired`. Feeds directly
+    into forming a remediation group (Module 3's core value proposition).
+
+    `classroom_id` used to be accepted but silently ignored -- a real bug,
+    since CurriculumUnit is scoped by subject+grade, not by classroom, so
+    without this filter two different classrooms sharing the same skill
+    would leak each other's struggling students into one list.
     """
+    classroom_student_ids = set(
+        session.exec(
+            select(Student.id).where(Student.classroom_id == classroom_id, Student.is_deleted == False)  # noqa: E712
+        ).all()
+    )
+    if not classroom_student_ids:
+        return {"unit_id": unit_id, "student_ids": []}
+
     details = session.exec(
         select(AssessmentDetail)
         .where(
             AssessmentDetail.curriculum_unit_id == unit_id,
+            AssessmentDetail.student_id.in_(classroom_student_ids),
             AssessmentDetail.is_deleted == False,  # noqa: E712
         )
         .order_by(AssessmentDetail.created_at.desc())
@@ -214,6 +280,21 @@ def create_remediation_session(
     return remediation
 
 
+@router.get("/classrooms/{classroom_id}/remediation-sessions", response_model=list[RemediationSessionRead])
+def list_remediation_sessions(
+    classroom_id: str,
+    curriculum_unit_id: Optional[str] = None,
+    session: Session = Depends(get_session),
+    _: User = Depends(get_current_user),
+):
+    query = select(RemediationSession).where(
+        RemediationSession.classroom_id == classroom_id, RemediationSession.is_deleted == False  # noqa: E712
+    )
+    if curriculum_unit_id:
+        query = query.where(RemediationSession.targeted_curriculum_unit_id == curriculum_unit_id)
+    return session.exec(query.order_by(RemediationSession.date.desc())).all()
+
+
 @router.post("/remediation-participants", response_model=RemediationParticipantRead)
 def add_remediation_participant(
     payload: RemediationParticipantCreate,
@@ -221,6 +302,39 @@ def add_remediation_participant(
     _: User = Depends(get_current_user),
 ):
     participant = RemediationParticipant(**payload.model_dump())
+    session.add(participant)
+    session.commit()
+    session.refresh(participant)
+    return participant
+
+
+@router.get("/remediation-sessions/{session_id}/participants", response_model=list[RemediationParticipantRead])
+def list_remediation_participants(
+    session_id: str, session: Session = Depends(get_session), _: User = Depends(get_current_user)
+):
+    return session.exec(
+        select(RemediationParticipant).where(
+            RemediationParticipant.remediation_session_id == session_id,
+            RemediationParticipant.is_deleted == False,  # noqa: E712
+        )
+    ).all()
+
+
+@router.patch("/remediation-participants/{participant_id}", response_model=RemediationParticipantRead)
+def update_remediation_participant(
+    participant_id: str,
+    payload: RemediationParticipantUpdate,
+    session: Session = Depends(get_session),
+    _: User = Depends(get_current_user),
+):
+    """Records the follow-up outcome (a later re-check) for one student in
+    one remediation group -- this is what turns the group from an anecdotal
+    "we did a support session" into a measurable before/after."""
+    participant = session.get(RemediationParticipant, participant_id)
+    if not participant or participant.is_deleted:
+        raise HTTPException(status_code=404, detail="المشارك غير موجود")
+    participant.after_level = payload.after_level
+    participant.updated_at = datetime.utcnow()
     session.add(participant)
     session.commit()
     session.refresh(participant)

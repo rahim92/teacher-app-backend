@@ -472,3 +472,99 @@ def test_parent_message_template_render_and_delete():
     assert deleted.status_code == 204
     assert client.get("/message-templates", headers=headers).json() == []
     assert client.delete(f"/message-templates/{template['id']}", headers=headers).status_code == 404
+
+
+def test_diagnostic_remediation_module():
+    """The whole diagnosis -> remediation-group -> follow-up workflow: a
+    teacher-authored skill (CurriculumUnit, since no ministry-content import
+    pipeline exists yet -- see create_curriculum_unit), marking two
+    students' mastery on it via one assessment, the struggling-students
+    alert correctly scoped to ONE classroom (not leaking a same-skill
+    student from another classroom -- a real bug in the original endpoint,
+    which accepted classroom_id but never used it), forming a remediation
+    session/group from it, and recording a participant's follow-up outcome.
+    """
+    headers, teacher = _register_and_login("remed_t")
+    year, term, classroom = _setup_classroom(headers, "1AM - remed")
+    # Same subject+grade as the first classroom (CurriculumUnit is scoped by
+    # subject+grade, not by classroom) -- its students must never leak in.
+    _, _, other_classroom = _setup_classroom(headers, "1AM - other")
+
+    subject = client.post("/subjects", json={"name": "الرياضيات"}, headers=headers).json()
+    s1 = client.post("/students", json={"classroom_id": classroom["id"], "first_name": "أمين", "last_name": "1"}, headers=headers).json()
+    s2 = client.post("/students", json={"classroom_id": classroom["id"], "first_name": "هدى", "last_name": "2"}, headers=headers).json()
+    other_student = client.post("/students", json={"classroom_id": other_classroom["id"], "first_name": "سارة", "last_name": "3"}, headers=headers).json()
+
+    unit = client.post("/curriculum-units", json={
+        "subject_id": subject["id"], "grade_level": "1AM", "title": "يقارن ويرتب الأعداد الطبيعية",
+        "unit_type": "skill", "order_index": 1, "year_version": "2026-2027",
+    }, headers=headers)
+    assert unit.status_code == 200, unit.text
+    unit = unit.json()
+
+    assessment = client.post("/assessments", json={
+        "classroom_id": classroom["id"], "subject_id": subject["id"], "assessment_type": "test",
+        "title": "تقييم تشخيصي", "date": "2026-09-10", "coefficient": 1, "max_score": 20,
+    }, headers=headers).json()
+    other_assessment = client.post("/assessments", json={
+        "classroom_id": other_classroom["id"], "subject_id": subject["id"], "assessment_type": "test",
+        "title": "تقييم تشخيصي آخر", "date": "2026-09-10", "coefficient": 1, "max_score": 20,
+    }, headers=headers).json()
+
+    # Mark s1 in_progress then correct to not_acquired via the same PUT
+    # (upsert, same pattern as /assessment-scores) -- no duplicate row.
+    d1 = client.put("/assessment-details", json={
+        "assessment_id": assessment["id"], "student_id": s1["id"], "curriculum_unit_id": unit["id"], "mastery_level": "in_progress",
+    }, headers=headers)
+    assert d1.status_code == 200, d1.text
+    d1_corrected = client.put("/assessment-details", json={
+        "assessment_id": assessment["id"], "student_id": s1["id"], "curriculum_unit_id": unit["id"], "mastery_level": "not_acquired",
+    }, headers=headers)
+    assert d1_corrected.status_code == 200, d1_corrected.text
+    client.put("/assessment-details", json={
+        "assessment_id": assessment["id"], "student_id": s2["id"], "curriculum_unit_id": unit["id"], "mastery_level": "acquired",
+    }, headers=headers)
+    # Same skill, but for a student in the OTHER classroom -- also not_acquired.
+    client.put("/assessment-details", json={
+        "assessment_id": other_assessment["id"], "student_id": other_student["id"], "curriculum_unit_id": unit["id"], "mastery_level": "not_acquired",
+    }, headers=headers)
+
+    details = client.get(f"/assessments/{assessment['id']}/details", headers=headers).json()
+    assert len(details) == 2  # the correction updated in place, not a duplicate row
+    by_student = {d["student_id"]: d["mastery_level"] for d in details}
+    assert by_student[s1["id"]] == "not_acquired"
+    assert by_student[s2["id"]] == "acquired"
+
+    # The struggling-students alert for THIS classroom must show only s1 --
+    # not other_student, even though they share curriculum_unit_id and are
+    # both not_acquired.
+    alert = client.get(f"/curriculum-units/{unit['id']}/struggling-students", params={"classroom_id": classroom["id"]}, headers=headers).json()
+    assert alert["student_ids"] == [s1["id"]]
+    other_alert = client.get(f"/curriculum-units/{unit['id']}/struggling-students", params={"classroom_id": other_classroom["id"]}, headers=headers).json()
+    assert other_alert["student_ids"] == [other_student["id"]]
+
+    # Form a remediation group targeting this skill, with s1 as participant,
+    # then record their follow-up outcome once known.
+    remediation = client.post("/remediation-sessions", json={
+        "classroom_id": classroom["id"], "date": "2026-09-15", "targeted_curriculum_unit_id": unit["id"], "notes": "مجموعة دعم مصغرة",
+    }, headers=headers)
+    assert remediation.status_code == 200, remediation.text
+    remediation = remediation.json()
+
+    participant = client.post("/remediation-participants", json={
+        "remediation_session_id": remediation["id"], "student_id": s1["id"], "before_level": "not_acquired",
+    }, headers=headers)
+    assert participant.status_code == 200, participant.text
+    participant = participant.json()
+    assert participant["after_level"] is None
+
+    sessions_listing = client.get(f"/classrooms/{classroom['id']}/remediation-sessions", headers=headers).json()
+    assert {r["id"] for r in sessions_listing} == {remediation["id"]}
+    participants_listing = client.get(f"/remediation-sessions/{remediation['id']}/participants", headers=headers).json()
+    assert {p["id"] for p in participants_listing} == {participant["id"]}
+
+    updated = client.patch(f"/remediation-participants/{participant['id']}", json={"after_level": "in_progress"}, headers=headers)
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["after_level"] == "in_progress"
+
+    assert client.patch("/remediation-participants/does-not-exist", json={"after_level": "acquired"}, headers=headers).status_code == 404

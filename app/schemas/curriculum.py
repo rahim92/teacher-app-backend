@@ -5,15 +5,18 @@ from pydantic import BaseModel
 from app.models.common import GradeLevel, UnitType
 
 
-class CurriculumUnitRead(BaseModel):
-    id: str
+class CurriculumUnitCreate(BaseModel):
     subject_id: str
     grade_level: GradeLevel
     parent_unit_id: Optional[str] = None
     title: str
     unit_type: UnitType
-    order_index: int
+    order_index: int = 0
     year_version: str
+
+
+class CurriculumUnitRead(CurriculumUnitCreate):
+    id: str
 
 
 class AnnualPlanCreate(BaseModel):

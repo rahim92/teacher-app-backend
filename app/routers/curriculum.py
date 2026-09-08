@@ -10,12 +10,35 @@ from app.models.session import LessonLog
 from app.schemas.curriculum import (
     AnnualPlanCreate,
     AnnualPlanRead,
+    CurriculumUnitCreate,
     CurriculumUnitRead,
     PlanItemCreate,
     PlanItemRead,
 )
 
 router = APIRouter(tags=["curriculum"])
+
+
+@router.post("/curriculum-units", response_model=CurriculumUnitRead)
+def create_curriculum_unit(
+    payload: CurriculumUnitCreate,
+    session: Session = Depends(get_session),
+    _: User = Depends(get_current_user),
+):
+    """MVP simplification: CurriculumUnit's own docstring describes it as a
+    centrally-curated reference tree teachers only download, never author --
+    but no ministry-content import pipeline exists yet, so a fresh install's
+    database starts with zero units unless `seed.py` was run by hand
+    directly against it. That leaves nothing to pick a "skill" from anywhere
+    the diagnostic/remediation module needs one. This endpoint lets a
+    teacher add their own tracked skill/unit directly until real curated
+    content exists; deliberately not admin-only for that reason.
+    """
+    unit = CurriculumUnit(**payload.model_dump())
+    session.add(unit)
+    session.commit()
+    session.refresh(unit)
+    return unit
 
 
 @router.get("/curriculum-units", response_model=list[CurriculumUnitRead])
