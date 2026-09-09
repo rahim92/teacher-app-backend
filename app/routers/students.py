@@ -164,14 +164,25 @@ def upsert_seat_assignment(
     if len(occupants) >= MAX_STUDENTS_PER_DESK:
         raise HTTPException(status_code=400, detail=f"هذا المقعد ممتلئ (الحد الأقصى {MAX_STUDENTS_PER_DESK} تلميذين في الطاولة الواحدة).")
 
+    moving_desk = not existing or existing.seat_row != payload.seat_row or existing.seat_col != payload.seat_col
+    if moving_desk:
+        # `occupants` excludes this student and is already capped below
+        # MAX_STUDENTS_PER_DESK above, so at most one other seat_slot value
+        # is taken at the target desk -- give this student the other one.
+        occupied_slots = {o.seat_slot for o in occupants}
+        next_slot = 0 if 0 not in occupied_slots else 1
+    else:
+        next_slot = existing.seat_slot  # staying put -- keep this student's slot as-is
+
     if existing:
         existing.seat_row = payload.seat_row
         existing.seat_col = payload.seat_col
+        existing.seat_slot = next_slot
         existing.reason = payload.reason
         existing.updated_at = datetime.utcnow()
         seat = existing
     else:
-        seat = SeatAssignment(teacher_id=current_user.id, **payload.model_dump())
+        seat = SeatAssignment(teacher_id=current_user.id, seat_slot=next_slot, **payload.model_dump())
 
     session.add(seat)
     session.commit()
@@ -185,9 +196,9 @@ def swap_seat_assignments(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Exchanges the (seat_row, seat_col) of two existing seat assignments
-    in one transaction -- e.g. dragging one student's seat icon onto another
-    student's to swap their places.
+    """Exchanges the full (seat_row, seat_col, seat_slot) position of two
+    existing seat assignments in one transaction -- e.g. dragging one
+    student's seat icon onto another student's to swap their places.
 
     This is deliberately its own endpoint rather than two sequential calls
     to `upsert_seat_assignment` above: a plain swap never changes how many
@@ -196,8 +207,15 @@ def swap_seat_assignments(
     the dragged student to the target desk BEFORE the target student has
     left it -- which the MAX_STUDENTS_PER_DESK check above would reject
     whenever the target desk is already at capacity (the common case, since
-    desks are meant to seat two). Swapping the two rows' coordinates
-    directly sidesteps that entirely.
+    desks are meant to seat two). Swapping the rows' coordinates directly
+    sidesteps that entirely.
+
+    Swapping `seat_slot` along with (seat_row, seat_col) -- not just the
+    desk coordinates -- is what makes this also work for two students
+    sharing the SAME desk (seat_row/seat_col identical for both already):
+    the coordinates trade for no visible change, but the slots trade their
+    left/right spot, which is exactly what dragging one onto the other at
+    one desk means.
     """
     a = session.get(SeatAssignment, payload.seat_id_a)
     b = session.get(SeatAssignment, payload.seat_id_b)
@@ -210,6 +228,7 @@ def swap_seat_assignments(
 
     a.seat_row, b.seat_row = b.seat_row, a.seat_row
     a.seat_col, b.seat_col = b.seat_col, a.seat_col
+    a.seat_slot, b.seat_slot = b.seat_slot, a.seat_slot
     a.updated_at = datetime.utcnow()
     b.updated_at = datetime.utcnow()
     session.add(a)
@@ -266,7 +285,17 @@ def create_notebook_check(
 ):
     """A periodic check of a student's own notebooks (كراس الدروس/الأنشطة) --
     a spot check, not a per-tap event. See docs/data_model.md.
+
+    Ownership check added alongside the writing_quality field: this endpoint
+    had no relation check at all -- any authenticated teacher could log a
+    notebook check (feeding directly into another student's behavior score)
+    for a student in a classroom they have nothing to do with. Same gap
+    shape as the one `_ensure_can_manage_student` was written for originally.
     """
+    student = session.get(Student, payload.student_id)
+    if not student or student.is_deleted:
+        raise HTTPException(status_code=404, detail="التلميذ غير موجود")
+    _ensure_can_manage_student(session, student, current_user)
     check = NotebookCheck(**payload.model_dump(), teacher_id=current_user.id)
     session.add(check)
     session.commit()

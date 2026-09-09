@@ -53,6 +53,10 @@ class SeatAssignmentUpsert(BaseModel):
 class SeatAssignmentRead(SeatAssignmentUpsert):
     id: str
     teacher_id: str
+    # Which of the (at most MAX_STUDENTS_PER_DESK) spots within the desk this
+    # is -- server-assigned only, never accepted on SeatAssignmentUpsert; see
+    # upsert_seat_assignment/swap_seat_assignments in routers/students.py.
+    seat_slot: int = 0
 
 
 class SeatSwapRequest(BaseModel):
@@ -77,7 +81,8 @@ class StudentSpecialNeedRead(StudentSpecialNeedCreate):
 class NotebookCheckCreate(BaseModel):
     student_id: str
     check_date: str
-    quality: NotebookQuality
+    quality: NotebookQuality  # تنظيم الكراس
+    writing_quality: Optional[NotebookQuality] = None  # الكتابة (السبورة والكراس)
     note: Optional[str] = None
 
 

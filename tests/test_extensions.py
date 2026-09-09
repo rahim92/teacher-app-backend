@@ -145,16 +145,46 @@ def test_seat_assignment_per_term_and_behavior_score():
     only_term = client.get(f"/classrooms/{classroom['id']}/seat-assignments", params={"term_id": term["id"]}, headers=headers).json()
     assert len(only_term) == 1 and only_term[0]["seat_col"] == 2
 
-    # Behaviour score: log a session, tap a mix of positive/negative events.
+    # Behaviour score: category set and weights now mirror the official
+    # كشف تنقيط المراقبة المستمرة sheet exactly (conduct 2, attendance 2 --
+    # absence+tardiness combined into ONE official column, materials 2,
+    # notebook 1, participation 5 -- merged with الفعالية, writing 2 --
+    # new, homework/"أعمال إضافية" 3, teamwork 2, initiative 1 -- 20 total).
+    # Every penalty_score category is full-marks-by-default, deducted only
+    # by its negative/exception tap -- the now-defunct "positive" taps
+    # (equipment_brought, teamwork_positive, homework_done) are tapped here
+    # too, specifically to prove they no longer move the score at all.
     class_session = client.post(
         "/class-sessions", json={"classroom_id": classroom["id"], "subject_id": subject["id"], "date": "2025-10-10"}, headers=headers
     ).json()
-    for event_type in ["equipment_brought", "equipment_brought", "equipment_missing", "homework_done", "homework_done", "tardiness"]:
+    for event_type in [
+        "equipment_brought", "equipment_brought", "equipment_missing",
+        "teamwork_positive", "teamwork_negative",
+        "homework_done", "homework_done",
+        "attendance_absent", "tardiness",
+        "behavior_negative",
+        "participation", "participation", "participation", "participation",
+        "initiative_shown", "initiative_shown", "initiative_shown",
+    ]:
         client.post(
             f"/class-sessions/{class_session['id']}/events",
             json={"session_id": class_session["id"], "student_id": student["id"], "event_type": event_type},
             headers=headers,
         )
+
+    # Two notebook checks this term: one rates both dimensions, the other
+    # (simulating a check made before writing_quality existed) rates only
+    # notebook organization -- writing_quality is left unset on purpose.
+    client.post(
+        "/notebook-checks",
+        json={"student_id": student["id"], "check_date": "2025-10-15", "quality": "organized", "writing_quality": "average"},
+        headers=headers,
+    )
+    client.post(
+        "/notebook-checks",
+        json={"student_id": student["id"], "check_date": "2025-10-20", "quality": "neglected"},
+        headers=headers,
+    )
 
     score = client.get(
         f"/students/{student['id']}/behavior-score",
@@ -162,12 +192,30 @@ def test_seat_assignment_per_term_and_behavior_score():
         headers=headers,
     ).json()
     breakdown = {b["category"]: b for b in score["breakdown"]}
-    # materials: 2 brought, 1 missing -> 2/3 of the max (default weight 2) = 1.33
-    assert breakdown["materials"]["points_earned"] == round(2.0 * 2 / 3, 2)
-    # homework: 2 done, 0 missing -> full marks
+    # conduct: one "negative" tap, penalty 0.5 off the max of 2.
+    assert breakdown["conduct"]["points_earned"] == 1.5
+    # attendance: one absence + one tardiness tap COMBINE into this single
+    # official column -- 2 taps * 0.5 off the max of 2 = 1.0.
+    assert breakdown["attendance"]["points_earned"] == 1.0
+    # materials: only the 1 "missing" tap counts -- the 2 "brought" taps are
+    # inert -- so it's penalty_score(1 tap) off the default max of 2 = 1.5.
+    assert breakdown["materials"]["points_earned"] == 1.5
+    # notebook (تنظيم الكراس): average of the two checks' `quality`
+    # (organized=1.0, neglected=0.0) -> 0.5 * max of 1 = 0.5.
+    assert breakdown["notebook"]["points_earned"] == 0.5
+    # participation (merged with الفعالية, max 5): 4 of the 8-tap target -> 5*4/8 = 2.5.
+    assert breakdown["participation"]["points_earned"] == 2.5
+    # writing (الكتابة): only ONE check recorded writing_quality (average=0.5)
+    # -- the other check's missing writing_quality is excluded, not counted
+    # as zero -- so it's 0.5 * max of 2 = 1.0, not diluted by the unrated check.
+    assert breakdown["writing"]["points_earned"] == 1.0
+    # homework ("أعمال إضافية"): zero "missing" taps -> full marks, regardless of the 2 inert "done" taps.
     assert breakdown["homework"]["points_earned"] == breakdown["homework"]["points_max"]
-    # tardiness: one tap, penalty 0.5 off the default max of 2
-    assert breakdown["tardiness"]["points_earned"] == 1.5
+    # teamwork: only the 1 "negative" tap counts, the 1 "positive" tap is inert.
+    assert breakdown["teamwork"]["points_earned"] == 1.5
+    # initiative: exactly the 3-tap target -> full marks of 1.
+    assert breakdown["initiative"]["points_earned"] == breakdown["initiative"]["points_max"]
+    assert score["total_max"] == 20
     assert score["total"] <= score["total_max"]
 
 
@@ -1021,3 +1069,28 @@ def test_seat_assignment_swap():
     # A missing seat id 404s rather than swapping garbage.
     missing = client.post("/seat-assignments/swap", json={"seat_id_a": a1["id"], "seat_id_b": "does-not-exist"}, headers=headers)
     assert missing.status_code == 404
+
+
+def test_seat_assignment_swap_within_same_desk():
+    """Two students sharing ONE desk (seat_row/seat_col identical for both)
+    must also be swappable -- e.g. the teacher wants to flip which of the
+    two sits on the left vs. right of that same table. Swapping just
+    (seat_row, seat_col) would be a no-op here since both already match;
+    what actually has to trade is seat_slot, the field that gives each
+    occupant of a shared desk its own left/right identity.
+    """
+    headers, _teacher = _register_and_login("seat_swap_same_desk")
+    _year, _term, classroom = _setup_classroom(headers, "1AM - seat-swap-same-desk")
+    s1 = client.post("/students", json={"classroom_id": classroom["id"], "first_name": "كريم", "last_name": "زروقي"}, headers=headers).json()
+    s2 = client.post("/students", json={"classroom_id": classroom["id"], "first_name": "نادية", "last_name": "زروقي"}, headers=headers).json()
+
+    a1 = client.put("/seat-assignments", json={"classroom_id": classroom["id"], "student_id": s1["id"], "seat_row": 1, "seat_col": 1}, headers=headers).json()
+    a2 = client.put("/seat-assignments", json={"classroom_id": classroom["id"], "student_id": s2["id"], "seat_row": 1, "seat_col": 1}, headers=headers).json()
+    assert a1["seat_slot"] != a2["seat_slot"]  # the two occupants of one desk must get distinct slots
+
+    swap = client.post("/seat-assignments/swap", json={"seat_id_a": a1["id"], "seat_id_b": a2["id"]}, headers=headers)
+    assert swap.status_code == 200, swap.text
+
+    by_student = {a["student_id"]: (a["seat_row"], a["seat_col"], a["seat_slot"]) for a in client.get(f"/classrooms/{classroom['id']}/seat-assignments", headers=headers).json()}
+    assert by_student[s1["id"]] == (1, 1, a2["seat_slot"])  # كريم now holds نادية's old slot
+    assert by_student[s2["id"]] == (1, 1, a1["seat_slot"])  # نادية now holds كريم's old slot

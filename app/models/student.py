@@ -40,6 +40,12 @@ class SeatAssignment(SyncableModel, table=True):
     term_id: Optional[str] = Field(default=None, foreign_key="terms.id", index=True)
     seat_row: int
     seat_col: int
+    # Which of the up-to-MAX_STUDENTS_PER_DESK spots within the desk this is
+    # (0 or 1 today) -- without this, two students sharing one desk have no
+    # persisted left/right identity, so swapping their places at the SAME
+    # desk had nothing to actually exchange. Server-assigned, never accepted
+    # from the client -- see upsert_seat_assignment/swap_seat_assignments.
+    seat_slot: int = Field(default=0)
     reason: Optional[str] = None
 
 
@@ -47,6 +53,17 @@ class NotebookCheck(SyncableModel, table=True):
     """A periodic check of a student's own notebooks (كراس الدروس /
     الأنشطة) -- how organized their writing/record-keeping is. Distinct from
     SessionEvent: this is a low-frequency spot check, not a per-tap moment.
+
+    Two independent dimensions per check, matching the official المراقبة
+    المستمرة rubric's two separate notebook-related columns (see
+    docs/data_model.md): `quality` is "تنظيم الكراس" (organization/tidiness,
+    under الانضباط والمواظبة), `writing_quality` is "الكتابة (السبورة
+    والكراس)" (how completely the board work/exercises were copied, under
+    المردود داخل القسم) -- a well-organized notebook and a thoroughly
+    written one are not the same thing, so a check rates both, not one.
+    `writing_quality` is optional/nullable so a check made before this field
+    existed doesn't need backfilling; see database.py's additive-column
+    migration and routers/behavior.py for how a missing value is handled.
     """
 
     __tablename__ = "notebook_checks"
@@ -55,6 +72,7 @@ class NotebookCheck(SyncableModel, table=True):
     teacher_id: str = Field(foreign_key="users.id", index=True)
     check_date: str
     quality: NotebookQuality
+    writing_quality: Optional[NotebookQuality] = Field(default=None)
     note: Optional[str] = None
 
 

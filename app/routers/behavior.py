@@ -1,19 +1,39 @@
-"""علامة السلوك -- an auto-computed 0-20 behaviour grade from the taps a
-teacher already makes during المراقبة المستمرة, so nobody has to tally them
-by hand at term's end.
+"""علامة السلوك -- an auto-computed 0-20 continuous-assessment grade
+(المراقبة المستمرة) from the taps a teacher already makes during class, so
+nobody has to tally them by hand at term's end.
 
-The category set (conduct, unexcused absence, tardiness, materials brought,
-participation, teamwork, notebook care, initiative, homework/task
-completion) mirrors the categories named in Algeria's December-2020 report
--card reform. The exact point-value per category has genuinely changed
-across ministerial circulars (our research turned up inconsistent totals
-across sources), so we deliberately do NOT hardcode one "official" split --
-DEFAULT_WEIGHTS below is a reasonable default that sums to 20, and every
-weight can be overridden per request via query params (a settings screen in
-the app can let a teacher persist their own split locally and pass it every
-call). The tap-count -> sub-score conversion (targets like "8 participation
-taps = full marks") is likewise a documented, adjustable assumption, not a
-ministry formula -- no official per-tap conversion exists to mirror.
+Unlike the earlier version of this file, the category set and every weight
+below are NOT a documented-but-adjustable guess -- they're copied directly
+from an official كشف تنقيط المراقبة المستمرة (continuous-assessment scoring
+sheet) the user provided, which groups its nine /20 columns into three
+sections:
+
+  الانضباط والمواظبة (discipline & attendance) -- 7ن
+    السلوك (conduct) 2ن، الغيابات والتأخيرات (absence+tardiness, ONE column
+    on the official sheet, not two) 2ن، إحضار الأدوات (materials) 2ن،
+    تنظيم الكراس (notebook organization) 1ن
+  المردود داخل القسم (in-class performance) -- 7ن
+    المشاركة (participation) 2ن + الفعالية (مناقشة تحليل..) 3ن -- merged
+    into one "participation" category per the user's explicit choice, so
+    5ن total -- والكتابة (السبورة والكراس) (writing quality) 2ن
+  المردود خارج القسم (out-of-class performance) -- 6ن
+    أعمال إضافية (additional work) 3ن، العمل ضمن فريق (teamwork) 2ن،
+    المبادرة والمساهمة (initiative) 1ن
+
+7 + 7 + 6 = 20. DEFAULT_WEIGHTS still exists as override points (a settings
+screen could let a teacher deviate from the official split), but the
+defaults themselves now ARE the official ones, not a placeholder.
+
+Every category is "full marks by default, deducted per negative tap"
+(penalty_score) except participation/writing/initiative, which have no
+natural negative reading of silence and are earned instead:
+participation/initiative from a positive tap count against a per-term
+target (target_score), writing/notebook from the average quality recorded
+during periodic notebook checks (see NotebookCheck.writing_quality/quality
+and models/student.py). A student with zero taps/checks in a category
+gets full marks for it automatically -- see the Quick Tap panel in
+classroom_dashboard.html, which only offers the exception-side tap for
+each penalty_score category for exactly this reason.
 """
 from collections import defaultdict
 
@@ -31,29 +51,31 @@ from app.schemas.behavior import BehaviorCategoryScore, BehaviorScore
 router = APIRouter(tags=["behavior"])
 
 DEFAULT_WEIGHTS = {
-    "conduct": 3.0,
-    "absence": 2.0,
-    "tardiness": 2.0,
+    "conduct": 2.0,
+    "attendance": 2.0,
     "materials": 2.0,
-    "participation": 2.0,
-    "teamwork": 2.0,
-    "notebook": 2.0,
-    "initiative": 2.0,
+    "notebook": 1.0,
+    "participation": 5.0,
+    "writing": 2.0,
     "homework": 3.0,
+    "teamwork": 2.0,
+    "initiative": 1.0,
 }
 LABELS_AR = {
-    "conduct": "السلوك العام",
-    "absence": "الغياب غير المبرر",
-    "tardiness": "التأخر",
+    "conduct": "السلوك",
+    "attendance": "الغيابات والتأخيرات",
     "materials": "إحضار الأدوات",
-    "participation": "المشاركة",
-    "teamwork": "العمل الجماعي",
     "notebook": "تنظيم الكراس",
+    "participation": "المشاركة والفعالية",
+    "writing": "الكتابة (السبورة والكراس)",
+    "homework": "أعمال إضافية",
+    "teamwork": "العمل ضمن فريق",
     "initiative": "المبادرة والمساهمة",
-    "homework": "الفعالية وإنجاز المهام",
 }
 # Assumed "full marks" tap counts per term for the categories that have no
-# natural done/missing ratio -- adjust here if a term's rhythm differs.
+# natural done/missing ratio -- adjust here if a term's rhythm differs. Not
+# part of the official sheet (it has no per-tap conversion to mirror), so
+# this stays a documented, adjustable assumption like before.
 PARTICIPATION_TARGET = 8
 INITIATIVE_TARGET = 3
 
@@ -64,27 +86,27 @@ def get_behavior_score(
     classroom_id: str,
     term_id: str,
     w_conduct: float = Query(default=DEFAULT_WEIGHTS["conduct"]),
-    w_absence: float = Query(default=DEFAULT_WEIGHTS["absence"]),
-    w_tardiness: float = Query(default=DEFAULT_WEIGHTS["tardiness"]),
+    w_attendance: float = Query(default=DEFAULT_WEIGHTS["attendance"]),
     w_materials: float = Query(default=DEFAULT_WEIGHTS["materials"]),
-    w_participation: float = Query(default=DEFAULT_WEIGHTS["participation"]),
-    w_teamwork: float = Query(default=DEFAULT_WEIGHTS["teamwork"]),
     w_notebook: float = Query(default=DEFAULT_WEIGHTS["notebook"]),
-    w_initiative: float = Query(default=DEFAULT_WEIGHTS["initiative"]),
+    w_participation: float = Query(default=DEFAULT_WEIGHTS["participation"]),
+    w_writing: float = Query(default=DEFAULT_WEIGHTS["writing"]),
     w_homework: float = Query(default=DEFAULT_WEIGHTS["homework"]),
+    w_teamwork: float = Query(default=DEFAULT_WEIGHTS["teamwork"]),
+    w_initiative: float = Query(default=DEFAULT_WEIGHTS["initiative"]),
     session: Session = Depends(get_session),
     _: User = Depends(get_current_user),
 ):
     weights = {
         "conduct": w_conduct,
-        "absence": w_absence,
-        "tardiness": w_tardiness,
+        "attendance": w_attendance,
         "materials": w_materials,
-        "participation": w_participation,
-        "teamwork": w_teamwork,
         "notebook": w_notebook,
-        "initiative": w_initiative,
+        "participation": w_participation,
+        "writing": w_writing,
         "homework": w_homework,
+        "teamwork": w_teamwork,
+        "initiative": w_initiative,
     }
 
     student = session.get(Student, student_id)
@@ -127,65 +149,78 @@ def get_behavior_score(
         )
     ).all()
 
-    def ratio_score(done_key: str, missing_key: str, max_points: float) -> float:
-        done, missing = counts.get(done_key, 0), counts.get(missing_key, 0)
-        total = done + missing
-        return max_points if total == 0 else max_points * done / total
-
-    def penalty_score(negative_key: str, max_points: float, penalty_per_tap: float = 0.5) -> float:
-        return max(0.0, max_points - min(max_points, counts.get(negative_key, 0) * penalty_per_tap))
+    def penalty_score(negative_keys, max_points: float, penalty_per_tap: float = 0.5) -> float:
+        # Accepts one event-type key or several (e.g. attendance combines
+        # attendance_absent + tardiness into a single official column) --
+        # every matching tap counts toward the same deduction.
+        if isinstance(negative_keys, str):
+            negative_keys = (negative_keys,)
+        taps = sum(counts.get(k, 0) for k in negative_keys)
+        return max(0.0, max_points - min(max_points, taps * penalty_per_tap))
 
     def target_score(key: str, target: int, max_points: float) -> float:
         return max_points * min(1.0, counts.get(key, 0) / target) if target else max_points
 
-    notebook_points = weights["notebook"]
-    if notebook_checks:
-        quality_weight = {NotebookQuality.organized: 1.0, NotebookQuality.average: 0.5, NotebookQuality.neglected: 0.0}
-        notebook_points = weights["notebook"] * (
-            sum(quality_weight[c.quality] for c in notebook_checks) / len(notebook_checks)
-        )
+    quality_weight = {NotebookQuality.organized: 1.0, NotebookQuality.average: 0.5, NotebookQuality.neglected: 0.0}
+
+    def quality_average_score(quality_of, max_points: float) -> float:
+        # Full marks by default (no checks yet this term, or none of them
+        # recorded this specific dimension -- e.g. a check made before
+        # writing_quality existed) rather than zero; see module docstring.
+        rated = [quality_of(c) for c in notebook_checks]
+        rated = [q for q in rated if q is not None]
+        if not rated:
+            return max_points
+        return max_points * (sum(quality_weight[q] for q in rated) / len(rated))
+
+    notebook_points = quality_average_score(lambda c: c.quality, weights["notebook"])
+    writing_points = quality_average_score(lambda c: c.writing_quality, weights["writing"])
 
     breakdown = [
+        # -- الانضباط والمواظبة --
         BehaviorCategoryScore(
             category="conduct", label_ar=LABELS_AR["conduct"],
             points_earned=round(penalty_score("behavior_negative", weights["conduct"]), 2), points_max=weights["conduct"],
         ),
         BehaviorCategoryScore(
-            category="absence", label_ar=LABELS_AR["absence"],
-            points_earned=round(penalty_score("attendance_absent", weights["absence"]), 2), points_max=weights["absence"],
-        ),
-        BehaviorCategoryScore(
-            category="tardiness", label_ar=LABELS_AR["tardiness"],
-            points_earned=round(penalty_score("tardiness", weights["tardiness"]), 2), points_max=weights["tardiness"],
+            category="attendance", label_ar=LABELS_AR["attendance"],
+            points_earned=round(penalty_score(("attendance_absent", "tardiness"), weights["attendance"]), 2),
+            points_max=weights["attendance"],
         ),
         BehaviorCategoryScore(
             category="materials", label_ar=LABELS_AR["materials"],
-            points_earned=round(ratio_score("equipment_brought", "equipment_missing", weights["materials"]), 2),
+            points_earned=round(penalty_score("equipment_missing", weights["materials"]), 2),
             points_max=weights["materials"],
         ),
+        BehaviorCategoryScore(
+            category="notebook", label_ar=LABELS_AR["notebook"],
+            points_earned=round(notebook_points, 2), points_max=weights["notebook"],
+        ),
+        # -- المردود داخل القسم --
         BehaviorCategoryScore(
             category="participation", label_ar=LABELS_AR["participation"],
             points_earned=round(target_score("participation", PARTICIPATION_TARGET, weights["participation"]), 2),
             points_max=weights["participation"],
         ),
         BehaviorCategoryScore(
-            category="teamwork", label_ar=LABELS_AR["teamwork"],
-            points_earned=round(ratio_score("teamwork_positive", "teamwork_negative", weights["teamwork"]), 2),
-            points_max=weights["teamwork"],
+            category="writing", label_ar=LABELS_AR["writing"],
+            points_earned=round(writing_points, 2), points_max=weights["writing"],
+        ),
+        # -- المردود خارج القسم --
+        BehaviorCategoryScore(
+            category="homework", label_ar=LABELS_AR["homework"],
+            points_earned=round(penalty_score("homework_missing", weights["homework"]), 2),
+            points_max=weights["homework"],
         ),
         BehaviorCategoryScore(
-            category="notebook", label_ar=LABELS_AR["notebook"],
-            points_earned=round(notebook_points, 2), points_max=weights["notebook"],
+            category="teamwork", label_ar=LABELS_AR["teamwork"],
+            points_earned=round(penalty_score("teamwork_negative", weights["teamwork"]), 2),
+            points_max=weights["teamwork"],
         ),
         BehaviorCategoryScore(
             category="initiative", label_ar=LABELS_AR["initiative"],
             points_earned=round(target_score("initiative_shown", INITIATIVE_TARGET, weights["initiative"]), 2),
             points_max=weights["initiative"],
-        ),
-        BehaviorCategoryScore(
-            category="homework", label_ar=LABELS_AR["homework"],
-            points_earned=round(ratio_score("homework_done", "homework_missing", weights["homework"]), 2),
-            points_max=weights["homework"],
         ),
     ]
 
