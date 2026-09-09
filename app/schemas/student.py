@@ -55,6 +55,11 @@ class SeatAssignmentRead(SeatAssignmentUpsert):
     teacher_id: str
 
 
+class SeatSwapRequest(BaseModel):
+    seat_id_a: str
+    seat_id_b: str
+
+
 class StudentSpecialNeedCreate(BaseModel):
     student_id: str
     category: SpecialNeedCategory

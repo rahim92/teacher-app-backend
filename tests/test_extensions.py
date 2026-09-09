@@ -979,3 +979,45 @@ def test_class_session_write_ownership():
         f"/class-sessions/{class_session['id']}/close", json={"end_time": "09:45"}, headers=headers_a
     )
     assert own_close.status_code == 200, own_close.text
+
+
+def test_seat_assignment_swap():
+    """Drag-and-drop seating in the dashboard swaps two students' desks by
+    calling this endpoint instead of two sequential PUTs, specifically
+    because two PUTs break when either desk is already at its two-student
+    capacity (the normal case) -- moving student A onto B's desk before B
+    has vacated it would transiently try to seat three people there and get
+    rejected by MAX_STUDENTS_PER_DESK. The swap must work even when BOTH
+    desks are already full, and must reject swapping someone else's map.
+    """
+    headers, _teacher = _register_and_login("seat_swap")
+    headers_other, _ = _register_and_login("seat_swap_stranger")
+    _year, _term, classroom = _setup_classroom(headers, "1AM - seat-swap")
+    s1 = client.post("/students", json={"classroom_id": classroom["id"], "first_name": "علي", "last_name": "بن"}, headers=headers).json()
+    s2 = client.post("/students", json={"classroom_id": classroom["id"], "first_name": "سعاد", "last_name": "بن"}, headers=headers).json()
+    s3 = client.post("/students", json={"classroom_id": classroom["id"], "first_name": "رياض", "last_name": "علي"}, headers=headers).json()
+    s4 = client.post("/students", json={"classroom_id": classroom["id"], "first_name": "ليلى", "last_name": "علي"}, headers=headers).json()
+
+    # Two FULL desks (two students each) -- the case that would break a
+    # naive two-PUT swap.
+    a1 = client.put("/seat-assignments", json={"classroom_id": classroom["id"], "student_id": s1["id"], "seat_row": 1, "seat_col": 1}, headers=headers).json()
+    client.put("/seat-assignments", json={"classroom_id": classroom["id"], "student_id": s2["id"], "seat_row": 1, "seat_col": 1}, headers=headers)
+    b1 = client.put("/seat-assignments", json={"classroom_id": classroom["id"], "student_id": s3["id"], "seat_row": 2, "seat_col": 1}, headers=headers).json()
+    client.put("/seat-assignments", json={"classroom_id": classroom["id"], "student_id": s4["id"], "seat_row": 2, "seat_col": 1}, headers=headers)
+
+    swap = client.post("/seat-assignments/swap", json={"seat_id_a": a1["id"], "seat_id_b": b1["id"]}, headers=headers)
+    assert swap.status_code == 200, swap.text
+
+    by_student = {a["student_id"]: (a["seat_row"], a["seat_col"]) for a in client.get(f"/classrooms/{classroom['id']}/seat-assignments", headers=headers).json()}
+    assert by_student[s1["id"]] == (2, 1)  # علي moved to رياض/ليلى's desk
+    assert by_student[s3["id"]] == (1, 1)  # رياض moved to علي/سعاد's desk
+    assert by_student[s2["id"]] == (1, 1)  # سعاد stayed put
+    assert by_student[s4["id"]] == (2, 1)  # ليلى stayed put
+
+    # An unrelated teacher can't swap seats on a map that isn't theirs.
+    forbidden = client.post("/seat-assignments/swap", json={"seat_id_a": a1["id"], "seat_id_b": b1["id"]}, headers=headers_other)
+    assert forbidden.status_code == 403
+
+    # A missing seat id 404s rather than swapping garbage.
+    missing = client.post("/seat-assignments/swap", json={"seat_id_a": a1["id"], "seat_id_b": "does-not-exist"}, headers=headers)
+    assert missing.status_code == 404

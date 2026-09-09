@@ -14,6 +14,7 @@ from app.schemas.student import (
     NotebookCheckRead,
     SeatAssignmentRead,
     SeatAssignmentUpsert,
+    SeatSwapRequest,
     StudentCreate,
     StudentRead,
     StudentSpecialNeedCreate,
@@ -176,6 +177,47 @@ def upsert_seat_assignment(
     session.commit()
     session.refresh(seat)
     return seat
+
+
+@router.post("/seat-assignments/swap", response_model=list[SeatAssignmentRead])
+def swap_seat_assignments(
+    payload: SeatSwapRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Exchanges the (seat_row, seat_col) of two existing seat assignments
+    in one transaction -- e.g. dragging one student's seat icon onto another
+    student's to swap their places.
+
+    This is deliberately its own endpoint rather than two sequential calls
+    to `upsert_seat_assignment` above: a plain swap never changes how many
+    students occupy either desk (it's still at most the same two people,
+    just relabeled), but two separate upserts would transiently try to add
+    the dragged student to the target desk BEFORE the target student has
+    left it -- which the MAX_STUDENTS_PER_DESK check above would reject
+    whenever the target desk is already at capacity (the common case, since
+    desks are meant to seat two). Swapping the two rows' coordinates
+    directly sidesteps that entirely.
+    """
+    a = session.get(SeatAssignment, payload.seat_id_a)
+    b = session.get(SeatAssignment, payload.seat_id_b)
+    if not a or a.is_deleted or not b or b.is_deleted:
+        raise HTTPException(status_code=404, detail="أحد تعييني المقعد غير موجود")
+    if a.teacher_id != current_user.id or b.teacher_id != current_user.id:
+        raise HTTPException(status_code=403, detail="يمكن فقط تبديل مقاعد ضمن خريطتك أنت")
+    if a.id == b.id:
+        return [a, b]
+
+    a.seat_row, b.seat_row = b.seat_row, a.seat_row
+    a.seat_col, b.seat_col = b.seat_col, a.seat_col
+    a.updated_at = datetime.utcnow()
+    b.updated_at = datetime.utcnow()
+    session.add(a)
+    session.add(b)
+    session.commit()
+    session.refresh(a)
+    session.refresh(b)
+    return [a, b]
 
 
 @router.delete("/seat-assignments/{seat_id}", status_code=204)
