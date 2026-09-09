@@ -812,3 +812,113 @@ def test_assessment_score_ownership_and_self_assign_rule():
         "teacher_id": teacher_d["id"], "classroom_id": classroom["id"], "subject_id": subject["id"], "academic_year_id": year["id"],
     }, headers=headers_b)
     assert not_manager_assign.status_code == 403
+
+
+def test_sync_push_and_pull_enforce_ownership():
+    """/sync/push and /sync/pull are a generic, entity-agnostic path that
+    used to completely bypass the per-endpoint ownership rules enforced
+    everywhere else in the app:
+
+    - push applied ANY create/update/delete a caller sent, for ANY entity,
+      with zero ownership check -- a teacher who merely knew (or guessed)
+      another teacher's record id could edit or soft-delete it, and a
+      create could set `teacher_id` to someone else's id outright.
+    - pull's only scoping was `hasattr(model, "teacher_id")`, which is
+      False for every entity whose ownership is chain-based rather than a
+      direct column (students, plan_items, session_events,
+      assessment_scores/details, remediation_participants, class_delegates)
+      -- so pulling those returned EVERY row in the database, across every
+      teacher, including guardian phone numbers, medical notes, grades and
+      behaviour taps that belong to classrooms the caller has no relation to.
+
+    This test covers both sides of the fix.
+    """
+    headers_a, teacher_a = _register_and_login("syncowner")
+    headers_b, teacher_b = _register_and_login("syncstranger")
+    _year, _term, classroom = _setup_classroom(headers_a, "1AM - syncauthz")
+    subject = client.post("/subjects", json={"name": "التاريخ"}, headers=headers_a).json()
+    student = client.post(
+        "/students", json={"classroom_id": classroom["id"], "first_name": "ياسين", "last_name": "بلحاج"}, headers=headers_a
+    ).json()
+    assessment = client.post("/assessments", json={
+        "classroom_id": classroom["id"], "subject_id": subject["id"], "assessment_type": "test",
+        "title": "فرض أصلي", "date": "2026-09-10", "coefficient": 1, "max_score": 20,
+    }, headers=headers_a).json()
+
+    def push(headers, mutations):
+        resp = client.post("/sync/push", json={"device_id": "dev-1", "mutations": mutations}, headers=headers)
+        assert resp.status_code == 200, resp.text
+        return resp.json()["results"]
+
+    now = "2026-09-10T10:00:00"
+
+    # An unrelated teacher can't rewrite someone else's assessment (direct
+    # teacher_id ownership) through sync...
+    results = push(headers_b, [{
+        "entity": "assessments", "operation": "update", "local_id": assessment["id"],
+        "data": {"title": "معدّل من طرف دخيل"}, "client_updated_at": now,
+    }])
+    assert results[0]["status"] == "error"
+
+    # ...or soft-delete someone else's student (classroom-relation ownership)...
+    results = push(headers_b, [{
+        "entity": "students", "operation": "delete", "local_id": student["id"],
+        "data": {}, "client_updated_at": now,
+    }])
+    assert results[0]["status"] == "error"
+
+    # ...or create a score on someone else's assessment (parent-chain ownership).
+    results = push(headers_b, [{
+        "entity": "assessment_scores", "operation": "create", "local_id": str(uuid.uuid4()),
+        "data": {"assessment_id": assessment["id"], "student_id": student["id"], "score": 20},
+        "client_updated_at": now,
+    }])
+    assert results[0]["status"] == "error"
+
+    # None of the above actually took effect.
+    still_there = client.get(f"/classrooms/{classroom['id']}/assessments", headers=headers_a).json()
+    original = next(a for a in still_there if a["id"] == assessment["id"])
+    assert original["title"] == "فرض أصلي"
+    students_now = client.get(f"/classrooms/{classroom['id']}/students", headers=headers_a).json()
+    assert any(s["id"] == student["id"] for s in students_now)
+
+    # A create can't spoof authorship either: teacher_b pushes a new
+    # assessment claiming teacher_id=teacher_a, but the server must force it
+    # to the actual caller.
+    spoofed_id = str(uuid.uuid4())
+    results = push(headers_b, [{
+        "entity": "assessments", "operation": "create", "local_id": spoofed_id,
+        "data": {
+            "classroom_id": classroom["id"], "subject_id": subject["id"], "teacher_id": teacher_a["id"],
+            "assessment_type": "test", "title": "منتحل", "date": "2026-09-11", "coefficient": 1, "max_score": 20,
+        },
+        "client_updated_at": now,
+    }])
+    assert results[0]["status"] == "applied", results
+    created = next(a for a in client.get(f"/classrooms/{classroom['id']}/assessments", headers=headers_a).json() if a["id"] == spoofed_id)
+    assert created["teacher_id"] == teacher_b["id"]
+
+    # The real owner can still legitimately push their own edit.
+    results = push(headers_a, [{
+        "entity": "assessments", "operation": "update", "local_id": assessment["id"],
+        "data": {"title": "فرض معدّل من صاحبه"}, "client_updated_at": now,
+    }])
+    assert results[0]["status"] == "applied"
+    updated = next(a for a in client.get(f"/classrooms/{classroom['id']}/assessments", headers=headers_a).json() if a["id"] == assessment["id"])
+    assert updated["title"] == "فرض معدّل من صاحبه"
+
+    # pull: a teacher with no relation to this classroom must not see its
+    # chain-owned students or assessment-scores, even though pull has no
+    # per-classroom filter to begin with.
+    client.put("/assessment-scores", json={
+        "assessment_id": assessment["id"], "student_id": student["id"], "score": 14,
+    }, headers=headers_a)
+    since = "1970-01-01T00:00:00"
+    pulled_b = client.get("/sync/pull", params={"since": since}, headers=headers_b).json()["changes"]
+    assert student["id"] not in [s["id"] for s in pulled_b.get("students", [])]
+    assert not any(sc["assessment_id"] == assessment["id"] for sc in pulled_b.get("assessment_scores", []))
+
+    # ...while the actual owner does see them.
+    pulled_a = client.get("/sync/pull", params={"since": since}, headers=headers_a).json()["changes"]
+    assert student["id"] in [s["id"] for s in pulled_a.get("students", [])]
+    assert any(sc["assessment_id"] == assessment["id"] for sc in pulled_a.get("assessment_scores", []))

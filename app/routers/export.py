@@ -18,6 +18,7 @@ from app.auth import get_current_user
 from app.database import get_session
 from app.models.identity import User
 from app.models.student import Student
+from app.routers.students import _ensure_can_manage_student
 
 router = APIRouter(prefix="/export", tags=["export"])
 
@@ -46,11 +47,17 @@ _STUDENT_CARD_TEMPLATE = """
 def export_student_card(
     student_id: str,
     session: Session = Depends(get_session),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     student = session.get(Student, student_id)
     if not student or student.is_deleted:
         raise HTTPException(status_code=404, detail="التلميذ غير موجود")
+    # Same relation check as editing this student (see students.py):
+    # this endpoint takes a bare student_id with no classroom context, and
+    # the card includes the student's name/birth date/notes -- unlike the
+    # deliberately open cross-teacher GETs elsewhere (ledger, behavior
+    # score), there's no classroom_id the caller had to already know here.
+    _ensure_can_manage_student(session, student, current_user)
 
     try:
         from weasyprint import HTML  # lazy import, see module docstring
