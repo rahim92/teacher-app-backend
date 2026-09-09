@@ -5,6 +5,7 @@ from sqlmodel import Session, select
 
 from app.auth import get_current_user
 from app.database import get_session
+from app.models.common import UserRole
 from app.models.identity import User
 from app.models.messaging import ParentMessageTemplate
 from app.schemas.messaging import (
@@ -64,7 +65,7 @@ def delete_template(
     template = session.get(ParentMessageTemplate, template_id)
     if not template or template.is_deleted:
         raise HTTPException(status_code=404, detail="النموذج غير موجود")
-    if template.teacher_id != current_user.id:
+    if template.teacher_id != current_user.id and current_user.role != UserRole.admin:
         raise HTTPException(status_code=403, detail="يمكن فقط لصاحب النموذج حذفه.")
     template.is_deleted = True
     template.updated_at = datetime.utcnow()
@@ -76,11 +77,20 @@ def delete_template(
 def render_template(
     payload: RenderMessageRequest,
     session: Session = Depends(get_session),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
+    """Real gap found in review: unlike list_templates (scoped to the
+    caller) and delete_template (owner-only), this endpoint had NO
+    ownership check at all -- any authenticated teacher could read the
+    contents of another teacher's private message template just by
+    guessing/knowing its id. Templates aren't shared between teachers
+    anywhere else in this router, so this shouldn't be either.
+    """
     template = session.get(ParentMessageTemplate, payload.template_id)
     if not template or template.is_deleted:
         raise HTTPException(status_code=404, detail="النموذج غير موجود")
+    if template.teacher_id != current_user.id and current_user.role != UserRole.admin:
+        raise HTTPException(status_code=403, detail="يمكن فقط لصاحب النموذج استعمال قالبه.")
 
     text = template.body_template.format_map(_SafeDict(payload.variables))
     return RenderMessageResponse(text=text)

@@ -464,6 +464,12 @@ def test_parent_message_template_render_and_delete():
     assert "أمين بلقاسم" in text and "2026-09-08" in text
     assert "{absences}" in text  # missing variable left visible, not an error
 
+    # An unrelated teacher can't render (read) someone else's template either.
+    rendered_other = client.post("/message-templates/render", json={
+        "template_id": template["id"], "variables": {"student_name": "دخيل"},
+    }, headers=headers_other)
+    assert rendered_other.status_code == 403
+
     # Only the template's own author may delete it.
     forbidden = client.delete(f"/message-templates/{template['id']}", headers=headers_other)
     assert forbidden.status_code == 403
@@ -922,3 +928,54 @@ def test_sync_push_and_pull_enforce_ownership():
     pulled_a = client.get("/sync/pull", params={"since": since}, headers=headers_a).json()["changes"]
     assert student["id"] in [s["id"] for s in pulled_a.get("students", [])]
     assert any(sc["assessment_id"] == assessment["id"] for sc in pulled_a.get("assessment_scores", []))
+
+
+def test_class_session_write_ownership():
+    """Another real gap found in the same review pass: `POST
+    /class-sessions/{id}/events` (the one-tap attendance/behavior endpoint)
+    and `POST /class-sessions/{id}/close` accepted a call from ANY
+    authenticated teacher for ANY session_id -- not even scoped to a
+    teacher of the classroom, just any logged-in account in the whole app.
+    A stranger could inject attendance/behavior taps into a lesson they
+    have nothing to do with, or prematurely close/corrupt it. Unlike
+    Student or Assessment, a ClassSession is run by exactly one teacher, so
+    the fix is a plain ownership match (see `_ensure_owns_session`), no
+    classroom-relation nuance needed.
+    """
+    headers_a, _teacher_a = _register_and_login("sessionowner")
+    headers_b, _teacher_b = _register_and_login("sessionstranger")
+    _year, _term, classroom = _setup_classroom(headers_a, "1AM - sessionauthz")
+    subject = client.post("/subjects", json={"name": "الرياضة"}, headers=headers_a).json()
+    student = client.post(
+        "/students", json={"classroom_id": classroom["id"], "first_name": "نور", "last_name": "زروقي"}, headers=headers_a
+    ).json()
+    class_session = client.post(
+        "/class-sessions", json={"classroom_id": classroom["id"], "subject_id": subject["id"], "date": "2026-09-09"},
+        headers=headers_a,
+    ).json()
+
+    # A stranger can't tap an event into someone else's session...
+    forbidden_event = client.post(
+        f"/class-sessions/{class_session['id']}/events",
+        json={"session_id": class_session["id"], "student_id": student["id"], "event_type": "attendance_absent"},
+        headers=headers_b,
+    )
+    assert forbidden_event.status_code == 403
+
+    # ...or close it.
+    forbidden_close = client.post(
+        f"/class-sessions/{class_session['id']}/close", json={"end_time": "09:45"}, headers=headers_b
+    )
+    assert forbidden_close.status_code == 403
+
+    # The actual owner can do both.
+    own_event = client.post(
+        f"/class-sessions/{class_session['id']}/events",
+        json={"session_id": class_session["id"], "student_id": student["id"], "event_type": "attendance_absent"},
+        headers=headers_a,
+    )
+    assert own_event.status_code == 200, own_event.text
+    own_close = client.post(
+        f"/class-sessions/{class_session['id']}/close", json={"end_time": "09:45"}, headers=headers_a
+    )
+    assert own_close.status_code == 200, own_close.text

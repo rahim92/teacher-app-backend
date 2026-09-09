@@ -5,7 +5,7 @@ from sqlmodel import Session, select
 
 from app.auth import get_current_user
 from app.database import get_session
-from app.models.common import SessionStatus
+from app.models.common import SessionStatus, UserRole
 from app.models.identity import User
 from app.models.session import ClassSession, LessonLog, SessionEvent
 from app.schemas.session import (
@@ -19,6 +19,18 @@ from app.schemas.session import (
 )
 
 router = APIRouter(tags=["sessions"])
+
+
+def _ensure_owns_session(class_session: ClassSession, current_user: User) -> None:
+    """A ClassSession is one lesson period run by ONE teacher -- unlike
+    Student/Assessment there's no legitimate multi-teacher collaboration
+    case for writing into someone else's session (the cross-teacher reads
+    elsewhere, e.g. the behaviour score or a student's ledger, are about
+    aggregating a classroom's whole history for council purposes, not about
+    tapping new events into another teacher's ongoing lesson).
+    """
+    if class_session.teacher_id != current_user.id and current_user.role != UserRole.admin:
+        raise HTTPException(status_code=403, detail="هذه الحصة ليست لك، فلا يمكنك تعديلها أو تسجيل أحداث فيها.")
 
 
 @router.post("/class-sessions", response_model=ClassSessionRead)
@@ -39,13 +51,24 @@ def add_session_event(
     session_id: str,
     payload: SessionEventCreate,
     session: Session = Depends(get_session),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """The 'one-tap' endpoint: called once per tap in the seating grid
     (attendance / tardiness / behavior / homework / participation).
+
+    Real gap found in review: this used to accept a tap from ANY
+    authenticated teacher for ANY session_id -- not even scoped to a
+    teacher of the classroom, just any logged-in account in the whole app
+    -- letting a stranger inject attendance/behavior taps into a lesson
+    they have nothing to do with. Now requires the session to actually
+    exist and belong to the caller.
     """
     if payload.session_id != session_id:
         raise HTTPException(status_code=400, detail="معرّف الحصة غير متطابق")
+    class_session = session.get(ClassSession, session_id)
+    if not class_session or class_session.is_deleted:
+        raise HTTPException(status_code=404, detail="الحصة غير موجودة")
+    _ensure_owns_session(class_session, current_user)
 
     event = SessionEvent(**payload.model_dump())
     session.add(event)
@@ -74,6 +97,7 @@ def close_session(
     class_session = session.get(ClassSession, session_id)
     if not class_session or class_session.is_deleted:
         raise HTTPException(status_code=404, detail="الحصة غير موجودة")
+    _ensure_owns_session(class_session, current_user)
 
     class_session.status = SessionStatus.closed
     class_session.end_time = payload.end_time
