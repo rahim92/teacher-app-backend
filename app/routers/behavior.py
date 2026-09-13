@@ -1,12 +1,14 @@
 """علامة السلوك -- an auto-computed 0-20 continuous-assessment grade
 (المراقبة المستمرة) from the taps a teacher already makes during class, so
-nobody has to tally them by hand at term's end.
+nobody has to tally them by hand at term's end. This is the same score the
+"المتابعة المستمرة" screen shows (the two used to be two separate home-screen
+tiles pointing at the exact same view -- one has since been removed as a
+pure duplicate, see docs/data_model.md §34).
 
-Unlike the earlier version of this file, the category set and every weight
-below are NOT a documented-but-adjustable guess -- they're copied directly
-from an official كشف تنقيط المراقبة المستمرة (continuous-assessment scoring
-sheet) the user provided, which groups its nine /20 columns into three
-sections:
+The category set and every weight below are NOT a documented-but-adjustable
+guess -- they're copied directly from an official كشف تنقيط المراقبة
+المستمرة (continuous-assessment scoring sheet) the user provided, which
+groups its nine /20 columns into three sections:
 
   الانضباط والمواظبة (discipline & attendance) -- 7ن
     السلوك (conduct) 2ن، الغيابات والتأخيرات (absence+tardiness, ONE column
@@ -24,16 +26,29 @@ sections:
 screen could let a teacher deviate from the official split), but the
 defaults themselves now ARE the official ones, not a placeholder.
 
-Every category is "full marks by default, deducted per negative tap"
-(penalty_score) except participation/writing/initiative, which have no
-natural negative reading of silence and are earned instead:
-participation/initiative from a positive tap count against a per-term
-target (target_score), writing/notebook from the average quality recorded
-during periodic notebook checks (see NotebookCheck.writing_quality/quality
-and models/student.py). A student with zero taps/checks in a category
-gets full marks for it automatically -- see the Quick Tap panel in
-classroom_dashboard.html, which only offers the exception-side tap for
-each penalty_score category for exactly this reason.
+Every category falls into exactly one of three scoring shapes:
+
+  - penalty_score (conduct, attendance, materials): full marks by default,
+    -0.5 per negative/exception tap, floored at 0. A student with zero taps
+    gets full marks automatically -- see the Quick Tap panel in
+    classroom_dashboard.html, which only offers the exception-side tap for
+    these categories for exactly this reason.
+  - bonus_score (participation, homework/"أعمال إضافية", teamwork,
+    initiative): the mirror image -- ZERO by default, +0.5 per positive tap,
+    capped at the category max. These four used to be a mix of inconsistent
+    shapes (participation/initiative computed as a ratio against an assumed
+    per-term tap target; homework/teamwork were actually penalty categories
+    reading the *missing*/*negative* tap) -- a teacher's explicit
+    instruction unified all four to the same flat "+0.5 per positive tap,
+    capped" rule, which also flips which SessionEventType each of
+    homework/teamwork reads: homework now reads `homework_done` (not
+    `homework_missing`) and teamwork now reads `teamwork_positive` (not
+    `teamwork_negative`). See docs/data_model.md §34.
+  - quality_average_score (notebook, writing): the average quality rating
+    from periodic notebook checks (NotebookCheck.quality/writing_quality,
+    see models/student.py), not taps at all. A student with zero checks
+    gets full marks (no evidence against them yet), same rationale as
+    penalty_score's default.
 """
 from collections import defaultdict
 
@@ -72,12 +87,12 @@ LABELS_AR = {
     "teamwork": "العمل ضمن فريق",
     "initiative": "المبادرة والمساهمة",
 }
-# Assumed "full marks" tap counts per term for the categories that have no
-# natural done/missing ratio -- adjust here if a term's rhythm differs. Not
-# part of the official sheet (it has no per-tap conversion to mirror), so
-# this stays a documented, adjustable assumption like before.
-PARTICIPATION_TARGET = 8
-INITIATIVE_TARGET = 3
+# Not part of the official sheet (it has no per-tap conversion to mirror),
+# so this stays a documented, adjustable constant: how many points one
+# positive/negative tap is worth, shared by every tap-based category
+# (bonus and penalty alike) -- the same 0.5/tap the official sheet's own
+# +٥/-٥ half-point granularity already implies for "الغيابات والتأخيرات".
+POINTS_PER_TAP = 0.5
 
 
 def compute_behavior_score(
@@ -136,17 +151,25 @@ def compute_behavior_score(
         )
     ).all()
 
-    def penalty_score(negative_keys, max_points: float, penalty_per_tap: float = 0.5) -> float:
+    def penalty_score(negative_keys, max_points: float, penalty_per_tap: float = POINTS_PER_TAP) -> float:
         # Accepts one event-type key or several (e.g. attendance combines
         # attendance_absent + tardiness into a single official column) --
-        # every matching tap counts toward the same deduction.
+        # every matching tap counts toward the same deduction. Full marks
+        # by default (zero taps), floored at 0 how ever many taps pile up.
         if isinstance(negative_keys, str):
             negative_keys = (negative_keys,)
         taps = sum(counts.get(k, 0) for k in negative_keys)
         return max(0.0, max_points - min(max_points, taps * penalty_per_tap))
 
-    def target_score(key: str, target: int, max_points: float) -> float:
-        return max_points * min(1.0, counts.get(key, 0) / target) if target else max_points
+    def bonus_score(positive_key: str, max_points: float, bonus_per_tap: float = POINTS_PER_TAP) -> float:
+        # The mirror image of penalty_score: ZERO by default (no evidence of
+        # the positive behaviour yet), +0.5 per tap, capped at max_points
+        # how ever many taps pile up. Used for every category that used to
+        # be either penalty-shaped on the wrong (missing/negative) tap, or a
+        # per-term-target ratio -- both replaced by this single flat rule
+        # per the teacher's explicit instruction (see module docstring).
+        taps = counts.get(positive_key, 0)
+        return min(max_points, taps * bonus_per_tap)
 
     quality_weight = {NotebookQuality.organized: 1.0, NotebookQuality.average: 0.5, NotebookQuality.neglected: 0.0}
 
@@ -186,7 +209,7 @@ def compute_behavior_score(
         # -- المردود داخل القسم --
         BehaviorCategoryScore(
             category="participation", label_ar=LABELS_AR["participation"],
-            points_earned=round(target_score("participation", PARTICIPATION_TARGET, weights["participation"]), 2),
+            points_earned=round(bonus_score("participation", weights["participation"]), 2),
             points_max=weights["participation"],
         ),
         BehaviorCategoryScore(
@@ -196,17 +219,17 @@ def compute_behavior_score(
         # -- المردود خارج القسم --
         BehaviorCategoryScore(
             category="homework", label_ar=LABELS_AR["homework"],
-            points_earned=round(penalty_score("homework_missing", weights["homework"]), 2),
+            points_earned=round(bonus_score("homework_done", weights["homework"]), 2),
             points_max=weights["homework"],
         ),
         BehaviorCategoryScore(
             category="teamwork", label_ar=LABELS_AR["teamwork"],
-            points_earned=round(penalty_score("teamwork_negative", weights["teamwork"]), 2),
+            points_earned=round(bonus_score("teamwork_positive", weights["teamwork"]), 2),
             points_max=weights["teamwork"],
         ),
         BehaviorCategoryScore(
             category="initiative", label_ar=LABELS_AR["initiative"],
-            points_earned=round(target_score("initiative_shown", INITIATIVE_TARGET, weights["initiative"]), 2),
+            points_earned=round(bonus_score("initiative_shown", weights["initiative"]), 2),
             points_max=weights["initiative"],
         ),
     ]

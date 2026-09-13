@@ -18,6 +18,7 @@ from app.schemas.session import (
     LessonLogUpdate,
     SessionEventCreate,
     SessionEventRead,
+    SessionEventUpdate,
 )
 
 router = APIRouter(tags=["sessions"])
@@ -70,6 +71,24 @@ def _get_owned_lesson_log(session: Session, log_id: str, current_user: User) -> 
     return log
 
 
+def _get_owned_session_event(session: Session, event_id: str, current_user: User) -> SessionEvent:
+    """A teacher taps the wrong button constantly (wrong student selected,
+    wrong category, an accidental double-tap) -- every tap directly moves
+    the auto-computed علامة السلوك, so leaving no way to undo one would make
+    a single misclick something the teacher can never fully correct. Same
+    ownership rule as a ClassSession itself (`_ensure_owns_session`): only
+    the teacher who ran that session (or admin) may edit/delete its taps.
+    """
+    event = session.get(SessionEvent, event_id)
+    if not event or event.is_deleted:
+        raise HTTPException(status_code=404, detail="لم يتم العثور على هذا التسجيل")
+    class_session = session.get(ClassSession, event.session_id)
+    if not class_session:
+        raise HTTPException(status_code=404, detail="الحصة المرتبطة بهذا التسجيل غير موجودة")
+    _ensure_owns_session(class_session, current_user)
+    return event
+
+
 @router.post("/class-sessions", response_model=ClassSessionRead)
 def open_session(
     payload: ClassSessionCreate,
@@ -119,6 +138,43 @@ def list_session_events(session_id: str, session: Session = Depends(get_session)
     return session.exec(
         select(SessionEvent).where(SessionEvent.session_id == session_id, SessionEvent.is_deleted == False)  # noqa: E712
     ).all()
+
+
+@router.patch("/session-events/{event_id}", response_model=SessionEventRead)
+def update_session_event(
+    event_id: str,
+    payload: SessionEventUpdate,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Fixes a mis-tap without deleting and re-creating it -- e.g. the
+    teacher meant "تأخر" but tapped "غائب"."""
+    event = _get_owned_session_event(session, event_id, current_user)
+    updates = payload.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        setattr(event, field, value)
+    event.updated_at = datetime.utcnow()
+    session.add(event)
+    session.commit()
+    session.refresh(event)
+    return event
+
+
+@router.delete("/session-events/{event_id}", status_code=204)
+def delete_session_event(
+    event_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Undoes a tap entirely -- wrong student picked, an accidental double
+    tap, etc. Soft delete like everything else, so it stops counting toward
+    علامة السلوك immediately (compute_behavior_score already filters on
+    is_deleted == False)."""
+    event = _get_owned_session_event(session, event_id, current_user)
+    event.is_deleted = True
+    event.updated_at = datetime.utcnow()
+    session.add(event)
+    session.commit()
 
 
 @router.post("/class-sessions/{session_id}/close", response_model=ClassSessionRead)

@@ -150,17 +150,21 @@ def test_seat_assignment_per_term_and_behavior_score():
     # absence+tardiness combined into ONE official column, materials 2,
     # notebook 1, participation 5 -- merged with الفعالية, writing 2 --
     # new, homework/"أعمال إضافية" 3, teamwork 2, initiative 1 -- 20 total).
-    # Every penalty_score category is full-marks-by-default, deducted only
-    # by its negative/exception tap -- the now-defunct "positive" taps
-    # (equipment_brought, teamwork_positive, homework_done) are tapped here
-    # too, specifically to prove they no longer move the score at all.
+    # conduct/attendance/materials are penalty_score (full-marks-by-default,
+    # deducted only by their negative/exception tap -- the inert "positive"
+    # taps for materials, equipment_brought, are tapped here too, to prove
+    # they don't move the score). participation/homework/teamwork/initiative
+    # are all bonus_score (zero-by-default, +0.5 per positive tap, capped) --
+    # homework reads homework_done and teamwork reads teamwork_positive, so
+    # the inert opposite taps (homework_missing, teamwork_negative) are
+    # tapped here too, to prove those no longer move the score either.
     class_session = client.post(
         "/class-sessions", json={"classroom_id": classroom["id"], "subject_id": subject["id"], "date": "2025-10-10"}, headers=headers
     ).json()
     for event_type in [
         "equipment_brought", "equipment_brought", "equipment_missing",
         "teamwork_positive", "teamwork_negative",
-        "homework_done", "homework_done",
+        "homework_done", "homework_done", "homework_missing",
         "attendance_absent", "tardiness",
         "behavior_negative",
         "participation", "participation", "participation", "participation",
@@ -203,20 +207,100 @@ def test_seat_assignment_per_term_and_behavior_score():
     # notebook (تنظيم الكراس): average of the two checks' `quality`
     # (organized=1.0, neglected=0.0) -> 0.5 * max of 1 = 0.5.
     assert breakdown["notebook"]["points_earned"] == 0.5
-    # participation (merged with الفعالية, max 5): 4 of the 8-tap target -> 5*4/8 = 2.5.
-    assert breakdown["participation"]["points_earned"] == 2.5
+    # participation (merged with الفعالية, max 5): 4 taps * 0.5/tap = 2.0.
+    assert breakdown["participation"]["points_earned"] == 2.0
     # writing (الكتابة): only ONE check recorded writing_quality (average=0.5)
     # -- the other check's missing writing_quality is excluded, not counted
     # as zero -- so it's 0.5 * max of 2 = 1.0, not diluted by the unrated check.
     assert breakdown["writing"]["points_earned"] == 1.0
-    # homework ("أعمال إضافية"): zero "missing" taps -> full marks, regardless of the 2 inert "done" taps.
-    assert breakdown["homework"]["points_earned"] == breakdown["homework"]["points_max"]
-    # teamwork: only the 1 "negative" tap counts, the 1 "positive" tap is inert.
-    assert breakdown["teamwork"]["points_earned"] == 1.5
-    # initiative: exactly the 3-tap target -> full marks of 1.
+    # homework ("أعمال إضافية"): 2 "done" taps * 0.5/tap = 1.0 -- the 1 "missing" tap is inert.
+    assert breakdown["homework"]["points_earned"] == 1.0
+    # teamwork: 1 "positive" tap * 0.5/tap = 0.5 -- the 1 "negative" tap is inert.
+    assert breakdown["teamwork"]["points_earned"] == 0.5
+    # initiative: 3 taps * 0.5/tap = 1.5, capped at the max of 1 -> full marks.
     assert breakdown["initiative"]["points_earned"] == breakdown["initiative"]["points_max"]
     assert score["total_max"] == 20
     assert score["total"] <= score["total_max"]
+
+
+def test_session_event_edit_and_undo_correct_a_mis_tap():
+    """A teacher taps the wrong button constantly -- wrong category, or the
+    same tap twice by mistake. PATCH lets them fix the category in place
+    (without losing the original timestamp), DELETE lets them undo a tap
+    entirely -- both must actually move the auto-computed علامة السلوك, and
+    both must stay refused for a teacher who doesn't own that class session.
+    """
+    headers, _teacher = _register_and_login("tap_fix_t")
+    headers_stranger, _stranger = _register_and_login("tap_fix_stranger")
+    year, term, classroom = _setup_classroom(headers, "2AM - tap-fix")
+    student = client.post(
+        "/students", json={"classroom_id": classroom["id"], "first_name": "أمين", "last_name": "خالدي"}, headers=headers
+    ).json()
+    subject = client.post("/subjects", json={"name": "التربية الإسلامية"}, headers=headers).json()
+    class_session = client.post(
+        "/class-sessions", json={"classroom_id": classroom["id"], "subject_id": subject["id"], "date": "2025-10-12"}, headers=headers
+    ).json()
+
+    # Tapped "غائب" by mistake -- the student was only late.
+    wrong_tap = client.post(
+        f"/class-sessions/{class_session['id']}/events",
+        json={"session_id": class_session["id"], "student_id": student["id"], "event_type": "attendance_absent"},
+        headers=headers,
+    ).json()
+    score_before_fix = client.get(
+        f"/students/{student['id']}/behavior-score", params={"classroom_id": classroom["id"], "term_id": term["id"]}, headers=headers,
+    ).json()
+    attendance_before = next(b for b in score_before_fix["breakdown"] if b["category"] == "attendance")
+    assert attendance_before["points_earned"] == 1.5  # one attendance-column tap, -0.5 off the max of 2
+
+    # A teacher with no relation to this classroom cannot fix -- or see --
+    # someone else's tap.
+    refused_patch = client.patch(
+        f"/session-events/{wrong_tap['id']}", json={"event_type": "tardiness"}, headers=headers_stranger,
+    )
+    assert refused_patch.status_code == 403
+    refused_delete = client.delete(f"/session-events/{wrong_tap['id']}", headers=headers_stranger)
+    assert refused_delete.status_code == 403
+
+    # The owning teacher corrects it in place -- still counts toward the
+    # SAME merged attendance column, so the score doesn't change...
+    fixed = client.patch(f"/session-events/{wrong_tap['id']}", json={"event_type": "tardiness"}, headers=headers)
+    assert fixed.status_code == 200, fixed.text
+    assert fixed.json()["event_type"] == "tardiness"
+    score_after_fix = client.get(
+        f"/students/{student['id']}/behavior-score", params={"classroom_id": classroom["id"], "term_id": term["id"]}, headers=headers,
+    ).json()
+    attendance_after_fix = next(b for b in score_after_fix["breakdown"] if b["category"] == "attendance")
+    assert attendance_after_fix["points_earned"] == 1.5  # unchanged: same official column either way
+
+    # A second, genuinely accidental double-tap the teacher wants to undo
+    # entirely -- conduct starts full marks (2), one negative tap -> 1.5.
+    accidental = client.post(
+        f"/class-sessions/{class_session['id']}/events",
+        json={"session_id": class_session["id"], "student_id": student["id"], "event_type": "behavior_negative"},
+        headers=headers,
+    ).json()
+    score_with_tap = client.get(
+        f"/students/{student['id']}/behavior-score", params={"classroom_id": classroom["id"], "term_id": term["id"]}, headers=headers,
+    ).json()
+    assert next(b for b in score_with_tap["breakdown"] if b["category"] == "conduct")["points_earned"] == 1.5
+
+    undone = client.delete(f"/session-events/{accidental['id']}", headers=headers)
+    assert undone.status_code == 204
+    score_after_undo = client.get(
+        f"/students/{student['id']}/behavior-score", params={"classroom_id": classroom["id"], "term_id": term["id"]}, headers=headers,
+    ).json()
+    conduct_after_undo = next(b for b in score_after_undo["breakdown"] if b["category"] == "conduct")
+    assert conduct_after_undo["points_earned"] == 2.0  # back to full marks -- the undone tap no longer counts
+
+    # An undone tap is gone from the session's event list too, not just from
+    # the score computation.
+    remaining = client.get(f"/class-sessions/{class_session['id']}/events", headers=headers).json()
+    assert accidental["id"] not in {e["id"] for e in remaining}
+
+    # Deleting (or editing) an already-deleted tap is a clean 404, not a crash.
+    redelete = client.delete(f"/session-events/{accidental['id']}", headers=headers)
+    assert redelete.status_code == 404
 
 
 def test_my_classrooms_covers_creator_homeroom_and_subject_teacher_roles():
@@ -1135,13 +1219,16 @@ def test_subject_grade_combines_continuous_with_test_and_exam_and_gates_by_subje
     url = f"/students/{student['id']}/subject-grade"
 
     # Before any فرض/اختبار is graded: continuous_assessment is always
-    # populated (14.0 with zero taps this term -- penalty_score categories
-    # default to full marks, but participation/initiative are earned rather
-    # than defaulted, see behavior.py's target_score), yet `average` stays
-    # None -- presenting the continuous score alone as a "final average"
-    # before any فرض/اختبار is graded would be misleading, not just partial.
+    # populated (9.0 with zero taps/checks this term -- conduct/attendance/
+    # materials are penalty_score and default to full marks (2+2+2=6),
+    # notebook/writing are quality_average_score and also default to full
+    # marks with no checks yet (1+2=3), but participation/homework/teamwork/
+    # initiative are bonus_score and default to ZERO with no positive taps
+    # yet -- see behavior.py's module docstring), yet `average` stays None
+    # -- presenting the continuous score alone as a "final average" before
+    # any فرض/اختبار is graded would be misleading, not just partial.
     grade = client.get(url, params=params, headers=headers_owner).json()
-    assert grade["continuous_assessment"] == 14.0
+    assert grade["continuous_assessment"] == 9.0
     assert grade["test_average"] is None
     assert grade["exam_average"] is None
     assert grade["average"] is None
@@ -1166,7 +1253,7 @@ def test_subject_grade_combines_continuous_with_test_and_exam_and_gates_by_subje
     assert grade["average"] is None
 
     # Now the اختبار is recorded too -- `average` becomes computable:
-    # midpoint = (14 + 12)/2 = 13 ; average = (13 + 10*2)/3 = 33/3 = 11.0
+    # midpoint = (9 + 12)/2 = 10.5 ; average = (10.5 + 10*2)/3 = 30.5/3 = 10.17
     exam_assessment = client.post(
         "/assessments",
         json={
@@ -1183,7 +1270,7 @@ def test_subject_grade_combines_continuous_with_test_and_exam_and_gates_by_subje
     grade = client.get(url, params=params, headers=headers_owner).json()
     assert grade["test_average"] == 12.0
     assert grade["exam_average"] == 10.0
-    assert grade["average"] == 11.0
+    assert grade["average"] == 10.17
 
     # A teacher assigned to a DIFFERENT subject in this same classroom must
     # be refused -- unlike roster-level access (_ensure_can_manage_student),

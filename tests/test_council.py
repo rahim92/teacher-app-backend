@@ -257,12 +257,14 @@ def test_council_report_combines_grades_across_subjects():
     assert row["student_id"] == student["id"]
     subject_avgs = {sa["subject_name"]: sa["average"] for sa in row["subject_averages"]}
     # المعدل = ((المراقبة المستمرة + معدل الفروض)/2 + معدل الاختبار×2) / 3
-    # continuous_assessment is 14.0 with zero taps/checks recorded (full
-    # marks on the penalty-score categories, but participation/initiative
-    # are earned-not-defaulted -- see behavior.py's target_score): so
-    # ((14+16)/2 + 17*2) / 3 = (15+34)/3 = 16.33 for both subjects here.
-    assert subject_avgs["الرياضيات"] == 16.33
-    assert subject_avgs["اللغة العربية"] == 16.33
-    # overall = (16.33*4 + 16.33*5) / (4+5) = 16.33
-    assert row["overall_average"] == 16.33
+    # continuous_assessment is 9.0 with zero taps/checks recorded (full
+    # marks on the penalty-score/quality-average categories -- conduct 2 +
+    # attendance 2 + materials 2 + notebook 1 + writing 2 = 9 -- but
+    # participation/homework/teamwork/initiative are bonus_score and default
+    # to ZERO with no positive taps yet, see behavior.py): so
+    # ((9+16)/2 + 17*2) / 3 = (12.5+34)/3 = 15.5 for both subjects here.
+    assert subject_avgs["الرياضيات"] == 15.5
+    assert subject_avgs["اللغة العربية"] == 15.5
+    # overall = (15.5*4 + 15.5*5) / (4+5) = 15.5
+    assert row["overall_average"] == 15.5
     assert row["rank"] == 1

@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel
@@ -40,6 +41,18 @@ class SessionEventCreate(BaseModel):
 
 class SessionEventRead(SessionEventCreate):
     id: str
+    created_at: datetime  # lets the client order/undo "my recent taps" without a separate lookup
+
+
+class SessionEventUpdate(BaseModel):
+    """Corrects a mis-tap in place (wrong button, wrong student... no --
+    wrong student is a delete-and-redo, but wrong event_type/value/note is
+    an edit) instead of forcing a delete-then-recreate that would lose the
+    original created_at ordering. Only fields actually sent are changed."""
+
+    event_type: Optional[SessionEventType] = None
+    value: Optional[float] = None
+    note: Optional[str] = None
 
 
 class LessonLogCreate(BaseModel):
