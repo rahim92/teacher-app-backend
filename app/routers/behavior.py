@@ -80,34 +80,21 @@ PARTICIPATION_TARGET = 8
 INITIATIVE_TARGET = 3
 
 
-@router.get("/students/{student_id}/behavior-score", response_model=BehaviorScore)
-def get_behavior_score(
+def compute_behavior_score(
+    session: Session,
     student_id: str,
     classroom_id: str,
     term_id: str,
-    w_conduct: float = Query(default=DEFAULT_WEIGHTS["conduct"]),
-    w_attendance: float = Query(default=DEFAULT_WEIGHTS["attendance"]),
-    w_materials: float = Query(default=DEFAULT_WEIGHTS["materials"]),
-    w_notebook: float = Query(default=DEFAULT_WEIGHTS["notebook"]),
-    w_participation: float = Query(default=DEFAULT_WEIGHTS["participation"]),
-    w_writing: float = Query(default=DEFAULT_WEIGHTS["writing"]),
-    w_homework: float = Query(default=DEFAULT_WEIGHTS["homework"]),
-    w_teamwork: float = Query(default=DEFAULT_WEIGHTS["teamwork"]),
-    w_initiative: float = Query(default=DEFAULT_WEIGHTS["initiative"]),
-    session: Session = Depends(get_session),
-    _: User = Depends(get_current_user),
-):
-    weights = {
-        "conduct": w_conduct,
-        "attendance": w_attendance,
-        "materials": w_materials,
-        "notebook": w_notebook,
-        "participation": w_participation,
-        "writing": w_writing,
-        "homework": w_homework,
-        "teamwork": w_teamwork,
-        "initiative": w_initiative,
-    }
+    weights: dict | None = None,
+) -> BehaviorScore:
+    """The actual computation behind GET /students/{id}/behavior-score,
+    factored out so other modules (grades.py, for the new subject-term
+    average; council.py) can get a student's continuous-assessment total
+    without an HTTP round-trip. `weights` defaults to DEFAULT_WEIGHTS (the
+    official split) -- callers that don't need the override-query-params
+    feature should just omit it.
+    """
+    weights = weights or DEFAULT_WEIGHTS
 
     student = session.get(Student, student_id)
     if not student or student.is_deleted:
@@ -231,3 +218,34 @@ def get_behavior_score(
         student_id=student_id, classroom_id=classroom_id, term_id=term_id,
         total=total, total_max=total_max, breakdown=breakdown,
     )
+
+
+@router.get("/students/{student_id}/behavior-score", response_model=BehaviorScore)
+def get_behavior_score(
+    student_id: str,
+    classroom_id: str,
+    term_id: str,
+    w_conduct: float = Query(default=DEFAULT_WEIGHTS["conduct"]),
+    w_attendance: float = Query(default=DEFAULT_WEIGHTS["attendance"]),
+    w_materials: float = Query(default=DEFAULT_WEIGHTS["materials"]),
+    w_notebook: float = Query(default=DEFAULT_WEIGHTS["notebook"]),
+    w_participation: float = Query(default=DEFAULT_WEIGHTS["participation"]),
+    w_writing: float = Query(default=DEFAULT_WEIGHTS["writing"]),
+    w_homework: float = Query(default=DEFAULT_WEIGHTS["homework"]),
+    w_teamwork: float = Query(default=DEFAULT_WEIGHTS["teamwork"]),
+    w_initiative: float = Query(default=DEFAULT_WEIGHTS["initiative"]),
+    session: Session = Depends(get_session),
+    _: User = Depends(get_current_user),
+) -> BehaviorScore:
+    weights = {
+        "conduct": w_conduct,
+        "attendance": w_attendance,
+        "materials": w_materials,
+        "notebook": w_notebook,
+        "participation": w_participation,
+        "writing": w_writing,
+        "homework": w_homework,
+        "teamwork": w_teamwork,
+        "initiative": w_initiative,
+    }
+    return compute_behavior_score(session, student_id, classroom_id, term_id, weights)

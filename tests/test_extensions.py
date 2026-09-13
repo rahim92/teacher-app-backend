@@ -904,7 +904,11 @@ def test_sync_push_and_pull_enforce_ownership():
         assert resp.status_code == 200, resp.text
         return resp.json()["results"]
 
-    now = "2026-09-10T10:00:00"
+    # Deliberately far in the future (not "today") -- a hardcoded date used to
+    # sit safely ahead of the server's real created_at/updated_at timestamps,
+    # but a run on/after that literal calendar date turned it into the past,
+    # making the final legitimate-edit push below look like a stale conflict.
+    now = "2030-01-01T10:00:00"
 
     # An unrelated teacher can't rewrite someone else's assessment (direct
     # teacher_id ownership) through sync...
@@ -1094,3 +1098,100 @@ def test_seat_assignment_swap_within_same_desk():
     by_student = {a["student_id"]: (a["seat_row"], a["seat_col"], a["seat_slot"]) for a in client.get(f"/classrooms/{classroom['id']}/seat-assignments", headers=headers).json()}
     assert by_student[s1["id"]] == (1, 1, a2["seat_slot"])  # كريم now holds نادية's old slot
     assert by_student[s2["id"]] == (1, 1, a1["seat_slot"])  # نادية now holds كريم's old slot
+
+
+def test_subject_grade_combines_continuous_with_test_and_exam_and_gates_by_subject():
+    """GET /students/{id}/subject-grade -- المعدل الفصلي للمادة, the new
+    endpoint tying المتابعة المستمرة (behavior-score) together with فرض/
+    اختبار grades using the official formula:
+        المعدل = ((المراقبة المستمرة + معدل الفروض) / 2 + معدل الاختبار × 2) / 3
+    Covers both halves of the feature: the formula only resolves once BOTH
+    a test-type and an exam-type score exist (not before), and access is
+    gated per-SUBJECT (not just per-classroom like most other endpoints) --
+    a teacher assigned to a different subject in the very same classroom
+    must be refused.
+    """
+    headers_creator, _teacher_creator = _register_and_login("grade_creator_t")
+    headers_owner, teacher_owner = _register_and_login("grade_subject_t")  # actually assigned to `subject`
+    headers_other, teacher_other = _register_and_login("grade_other_subj_t")  # assigned to a DIFFERENT subject
+    year, term, classroom = _setup_classroom(headers_creator, "2AM - grades")
+    student = client.post(
+        "/students", json={"classroom_id": classroom["id"], "first_name": "ريم", "last_name": "حمدي"}, headers=headers_creator
+    ).json()
+    subject = client.post("/subjects", json={"name": "العلوم الفيزيائية والتكنولوجيا"}, headers=headers_creator).json()
+    other_subject = client.post("/subjects", json={"name": "التاريخ والجغرافيا"}, headers=headers_creator).json()
+    client.post(
+        "/teacher-classroom-assignments",
+        json={"teacher_id": teacher_owner["id"], "classroom_id": classroom["id"], "subject_id": subject["id"], "academic_year_id": year["id"]},
+        headers=headers_creator,
+    )
+    client.post(
+        "/teacher-classroom-assignments",
+        json={"teacher_id": teacher_other["id"], "classroom_id": classroom["id"], "subject_id": other_subject["id"], "academic_year_id": year["id"]},
+        headers=headers_creator,
+    )
+
+    params = {"classroom_id": classroom["id"], "subject_id": subject["id"], "term_id": term["id"]}
+    url = f"/students/{student['id']}/subject-grade"
+
+    # Before any فرض/اختبار is graded: continuous_assessment is always
+    # populated (14.0 with zero taps this term -- penalty_score categories
+    # default to full marks, but participation/initiative are earned rather
+    # than defaulted, see behavior.py's target_score), yet `average` stays
+    # None -- presenting the continuous score alone as a "final average"
+    # before any فرض/اختبار is graded would be misleading, not just partial.
+    grade = client.get(url, params=params, headers=headers_owner).json()
+    assert grade["continuous_assessment"] == 14.0
+    assert grade["test_average"] is None
+    assert grade["exam_average"] is None
+    assert grade["average"] is None
+
+    # Only a فرض (test) recorded so far -- still not enough for `average`.
+    test_assessment = client.post(
+        "/assessments",
+        json={
+            "classroom_id": classroom["id"], "subject_id": subject["id"], "assessment_type": "test",
+            "title": "فرض 1", "date": "2025-10-01", "coefficient": 1, "max_score": 20,
+        },
+        headers=headers_creator,
+    ).json()
+    client.post(
+        "/assessment-scores",
+        json={"assessment_id": test_assessment["id"], "student_id": student["id"], "score": 12},
+        headers=headers_creator,
+    )
+    grade = client.get(url, params=params, headers=headers_owner).json()
+    assert grade["test_average"] == 12.0
+    assert grade["exam_average"] is None
+    assert grade["average"] is None
+
+    # Now the اختبار is recorded too -- `average` becomes computable:
+    # midpoint = (14 + 12)/2 = 13 ; average = (13 + 10*2)/3 = 33/3 = 11.0
+    exam_assessment = client.post(
+        "/assessments",
+        json={
+            "classroom_id": classroom["id"], "subject_id": subject["id"], "assessment_type": "exam",
+            "title": "اختبار الفصل الأول", "date": "2025-12-05", "coefficient": 1, "max_score": 20,
+        },
+        headers=headers_creator,
+    ).json()
+    client.post(
+        "/assessment-scores",
+        json={"assessment_id": exam_assessment["id"], "student_id": student["id"], "score": 10},
+        headers=headers_creator,
+    )
+    grade = client.get(url, params=params, headers=headers_owner).json()
+    assert grade["test_average"] == 12.0
+    assert grade["exam_average"] == 10.0
+    assert grade["average"] == 11.0
+
+    # A teacher assigned to a DIFFERENT subject in this same classroom must
+    # be refused -- unlike roster-level access (_ensure_can_manage_student),
+    # seeing a subject's grades requires actually teaching THAT subject.
+    denied = client.get(url, params=params, headers=headers_other)
+    assert denied.status_code == 403
+
+    # The classroom's creator can still see every subject (MVP convenience,
+    # same as elsewhere in this app), even without an explicit assignment.
+    as_creator = client.get(url, params=params, headers=headers_creator)
+    assert as_creator.status_code == 200

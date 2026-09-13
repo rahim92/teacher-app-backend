@@ -1,12 +1,20 @@
 """مجلس القسم -- the class council report.
 
 The one place in this app that deliberately crosses teacher boundaries: it
-combines every subject teacher's grades (AssessmentScore) and every
-teacher's attendance/behavior taps (SessionEvent) for one classroom into a
-single per-student summary. Because that reveals one teacher's data to
-another, access is restricted (see _ensure_can_view_council) to the
-classroom's homeroom teacher ("الأستاذ الرئيسي", capped at one classroom per
-year -- see the unique constraint on Classroom) or an admin account.
+combines every subject teacher's grades and every teacher's attendance/
+behavior taps (SessionEvent) for one classroom into a single per-student
+summary. Because that reveals one teacher's data to another, access is
+restricted (see _ensure_can_view_council) to the classroom's homeroom
+teacher ("الأستاذ الرئيسي", capped at one classroom per year -- see the
+unique constraint on Classroom) or an admin account.
+
+Each subject's average is now `grades.compute_subject_term_grade` -- the
+same official المراقبة المستمرة/فرض/اختبار formula exposed per-teacher at
+GET /students/{id}/subject-grade -- rather than this file's own averaging
+logic, so the two views can never disagree. (Older behavior: every graded
+Assessment of any type, including homework/oral, averaged together weighted
+by Assessment.coefficient. That shortcut is gone; see grades.py's docstring
+for why homework/oral don't factor into the official formula.)
 
 This only produces useful output once several teachers' TeacherClassroomAssignment
 rows exist for the classroom -- in a single-teacher MVP install it will
@@ -20,11 +28,11 @@ from sqlmodel import Session, select
 
 from app.auth import get_current_user
 from app.database import get_session
-from app.models.assessment import Assessment, AssessmentScore
 from app.models.common import SessionEventType, UserRole
 from app.models.identity import Classroom, Subject, TeacherClassroomAssignment, Term, User
 from app.models.session import ClassSession, SessionEvent
 from app.models.student import Student
+from app.routers.grades import compute_subject_term_grade
 from app.schemas.council import CouncilReport, StudentCouncilRow, SubjectAverage
 
 router = APIRouter(prefix="/council", tags=["council"])
@@ -73,30 +81,6 @@ def get_council_report(
         else {}
     )
 
-    # subject_id -> student_id -> [(score normalized to /20, assessment coefficient), ...]
-    per_subject_scores: dict[str, dict[str, list[tuple[float, float]]]] = defaultdict(lambda: defaultdict(list))
-
-    for subject_id in subject_ids:
-        assessments = session.exec(
-            select(Assessment).where(
-                Assessment.classroom_id == classroom_id,
-                Assessment.subject_id == subject_id,
-                Assessment.date >= term.start_date,
-                Assessment.date <= term.end_date,
-                Assessment.is_deleted == False,  # noqa: E712
-            )
-        ).all()
-        for assessment in assessments:
-            scores = session.exec(
-                select(AssessmentScore).where(
-                    AssessmentScore.assessment_id == assessment.id,
-                    AssessmentScore.is_deleted == False,  # noqa: E712
-                )
-            ).all()
-            for sc in scores:
-                normalized = (sc.score / assessment.max_score) * 20 if assessment.max_score else 0.0
-                per_subject_scores[subject_id][sc.student_id].append((normalized, assessment.coefficient))
-
     # Attendance/behavior aggregated across EVERY subject teacher for this
     # classroom -- this cross-teacher join is exactly why this endpoint is
     # permission-gated above.
@@ -122,13 +106,8 @@ def get_council_report(
         weight_total = 0.0
 
         for subject_id, subject in subjects.items():
-            student_scores = per_subject_scores.get(subject_id, {}).get(student.id, [])
-            if student_scores:
-                numerator = sum(score * coef for score, coef in student_scores)
-                denominator = sum(coef for _, coef in student_scores)
-                subject_avg = numerator / denominator if denominator else None
-            else:
-                subject_avg = None
+            grade = compute_subject_term_grade(session, student.id, classroom_id, subject_id, term_id)
+            subject_avg = grade.average
 
             subject_averages.append(SubjectAverage(subject_id=subject_id, subject_name=subject.name, average=subject_avg))
             if subject_avg is not None:

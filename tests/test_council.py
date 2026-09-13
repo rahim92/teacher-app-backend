@@ -207,6 +207,46 @@ def test_council_report_combines_grades_across_subjects():
         headers=headers_arabic,
     )
 
+    # Each subject's average now needs an اختبار score too (test-only was
+    # enough under the old "average everything" shortcut, but the official
+    # formula -- see grades.py -- stays None until BOTH exist).
+    math_exam = client.post(
+        "/assessments",
+        json={
+            "classroom_id": classroom["id"],
+            "subject_id": math_subject["id"],
+            "assessment_type": "exam",
+            "title": "اختبار الفصل الأول",
+            "date": "2025-12-10",
+            "coefficient": 1,
+            "max_score": 20,
+        },
+        headers=headers_math,
+    ).json()
+    client.post(
+        "/assessment-scores",
+        json={"assessment_id": math_exam["id"], "student_id": student["id"], "score": 17},
+        headers=headers_math,
+    )
+    arabic_exam = client.post(
+        "/assessments",
+        json={
+            "classroom_id": classroom["id"],
+            "subject_id": arabic_subject["id"],
+            "assessment_type": "exam",
+            "title": "اختبار الفصل الأول",
+            "date": "2025-12-12",
+            "coefficient": 1,
+            "max_score": 20,
+        },
+        headers=headers_arabic,
+    ).json()
+    client.post(
+        "/assessment-scores",
+        json={"assessment_id": arabic_exam["id"], "student_id": student["id"], "score": 17},
+        headers=headers_arabic,
+    )
+
     report = client.get(
         f"/council/classrooms/{classroom['id']}/report",
         params={"term_id": term["id"]},
@@ -216,8 +256,13 @@ def test_council_report_combines_grades_across_subjects():
     row = report["rows"][0]
     assert row["student_id"] == student["id"]
     subject_avgs = {sa["subject_name"]: sa["average"] for sa in row["subject_averages"]}
-    assert subject_avgs["الرياضيات"] == 16.0
-    assert subject_avgs["اللغة العربية"] == 16.0
-    # overall = (16*4 + 16*5) / (4+5) = 16.0
-    assert row["overall_average"] == 16.0
+    # المعدل = ((المراقبة المستمرة + معدل الفروض)/2 + معدل الاختبار×2) / 3
+    # continuous_assessment is 14.0 with zero taps/checks recorded (full
+    # marks on the penalty-score categories, but participation/initiative
+    # are earned-not-defaulted -- see behavior.py's target_score): so
+    # ((14+16)/2 + 17*2) / 3 = (15+34)/3 = 16.33 for both subjects here.
+    assert subject_avgs["الرياضيات"] == 16.33
+    assert subject_avgs["اللغة العربية"] == 16.33
+    # overall = (16.33*4 + 16.33*5) / (4+5) = 16.33
+    assert row["overall_average"] == 16.33
     assert row["rank"] == 1
