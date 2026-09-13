@@ -25,7 +25,37 @@ _ADDITIVE_COLUMNS = [
     # SQLAlchemy only ever sends/reads the enum's plain string value either
     # way, so a same-length VARCHAR holds it exactly as well.
     ("notebook_checks", "writing_quality", "VARCHAR(9)"),
+    # `lesson` is the correct backfill for every pre-existing row -- they
+    # were all real taught lessons (the only kind LessonLog could represent
+    # before lesson_type existed).
+    ("lesson_logs", "lesson_type", "VARCHAR(20) NOT NULL DEFAULT 'lesson'"),
+    ("lesson_logs", "resource", "TEXT"),
 ]
+
+# Columns that used to be NOT NULL but had that constraint deliberately
+# relaxed later (as opposed to _ADDITIVE_COLUMNS, which only ever adds a
+# brand-new column). PostgreSQL supports dropping a NOT NULL constraint in
+# place; SQLite's ALTER TABLE can't do this at all, so this only runs on
+# PostgreSQL -- a stale local SQLite file predating the change is rare and
+# disposable in dev (tests already start from a fresh DB file every run).
+_NULLABLE_COLUMNS = [
+    # curriculum_unit_id: a holiday/general-support LessonLog entry has no
+    # single competency to point at (see models/session.py's docstring).
+    ("lesson_logs", "curriculum_unit_id"),
+]
+
+
+def _patch_nullable_columns() -> None:
+    if engine.dialect.name != "postgresql":
+        return
+    for table, column in _NULLABLE_COLUMNS:
+        with engine.connect() as conn:
+            trans = conn.begin()
+            try:
+                conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN {column} DROP NOT NULL"))
+                trans.commit()
+            except (OperationalError, ProgrammingError):
+                trans.rollback()
 
 
 def _patch_additive_columns() -> None:
@@ -56,6 +86,7 @@ def init_db() -> None:
     """
     SQLModel.metadata.create_all(engine)
     _patch_additive_columns()
+    _patch_nullable_columns()
 
 
 def get_session():

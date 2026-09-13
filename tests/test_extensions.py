@@ -1195,3 +1195,108 @@ def test_subject_grade_combines_continuous_with_test_and_exam_and_gates_by_subje
     # same as elsewhere in this app), even without an explicit assignment.
     as_creator = client.get(url, params=params, headers=headers_creator)
     assert as_creator.status_code == 200
+
+
+def test_lesson_log_richer_types_validation_ownership_and_search():
+    """The richer دفتر النصوص/الكراس اليومي: lesson_type + resource fields,
+    curriculum_unit_id now optional (only a "هولاية/توقف" entry can omit it),
+    an ownership check that didn't exist before (create_lesson_log used to
+    accept a log for ANY classroom from ANY authenticated teacher), and
+    edit/delete/search now that a teacher can actually fix or find an entry.
+    """
+    headers_owner, teacher_owner = _register_and_login("journal_owner_t")
+    headers_other, _teacher_other = _register_and_login("journal_other_t")
+    year, term, classroom = _setup_classroom(headers_owner, "3AM - journal")
+    subject = client.post("/subjects", json={"name": "الرياضيات"}, headers=headers_owner).json()
+    unit = client.post(
+        "/curriculum-units",
+        json={
+            "subject_id": subject["id"], "grade_level": "1AM", "title": "الأعداد الطبيعية",
+            "unit_type": "unit", "order_index": 1, "year_version": "2025-2026",
+        },
+        headers=headers_owner,
+    ).json()
+
+    # A regular lesson without curriculum_unit_id is rejected -- only a
+    # holiday entry may omit it.
+    missing_unit = client.post(
+        "/lesson-logs",
+        json={"classroom_id": classroom["id"], "date": "2025-10-05", "lesson_type": "lesson"},
+        headers=headers_owner,
+    )
+    assert missing_unit.status_code == 400
+
+    # A real lesson entry, with the new resource field.
+    lesson = client.post(
+        "/lesson-logs",
+        json={
+            "classroom_id": classroom["id"], "date": "2025-10-05", "lesson_type": "lesson",
+            "curriculum_unit_id": unit["id"], "resource": "الكتاب المدرسي ص24", "observations": "سير جيد للحصة",
+        },
+        headers=headers_owner,
+    ).json()
+    assert lesson["lesson_type"] == "lesson"
+    assert lesson["resource"] == "الكتاب المدرسي ص24"
+
+    # A holiday entry needs no curriculum_unit_id at all.
+    holiday = client.post(
+        "/lesson-logs",
+        json={"classroom_id": classroom["id"], "date": "2025-10-06", "lesson_type": "holiday"},
+        headers=headers_owner,
+    )
+    assert holiday.status_code == 200, holiday.text
+    assert holiday.json()["curriculum_unit_id"] is None
+
+    # Ownership: a teacher with no relation to this classroom is refused.
+    denied = client.post(
+        "/lesson-logs",
+        json={"classroom_id": classroom["id"], "date": "2025-10-07", "lesson_type": "holiday"},
+        headers=headers_other,
+    )
+    assert denied.status_code == 403
+
+    # Search: filter by lesson_type and date range.
+    only_holidays = client.get(
+        f"/classrooms/{classroom['id']}/lesson-logs",
+        params={"lesson_type": "holiday"},
+        headers=headers_owner,
+    ).json()
+    assert len(only_holidays) == 1 and only_holidays[0]["date"] == "2025-10-06"
+
+    narrow_range = client.get(
+        f"/classrooms/{classroom['id']}/lesson-logs",
+        params={"date_from": "2025-10-06", "date_to": "2025-10-06"},
+        headers=headers_owner,
+    ).json()
+    assert len(narrow_range) == 1 and narrow_range[0]["id"] == holiday.json()["id"]
+
+    # Edit: fixing the lesson's observations shouldn't require resending
+    # curriculum_unit_id (partial update).
+    patched = client.patch(
+        f"/lesson-logs/{lesson['id']}",
+        json={"observations": "تعديل: سير ممتاز للحصة"},
+        headers=headers_owner,
+    ).json()
+    assert patched["observations"] == "تعديل: سير ممتاز للحصة"
+    assert patched["curriculum_unit_id"] == unit["id"]  # untouched by the partial update
+
+    # Edit: switching an entry to a type that needs a unit, while removing
+    # it at the same time, is rejected.
+    bad_switch = client.patch(
+        f"/lesson-logs/{holiday.json()['id']}",
+        json={"lesson_type": "remediation"},
+        headers=headers_owner,
+    )
+    assert bad_switch.status_code == 400
+
+    # Delete: soft-deleted entries drop out of the listing.
+    delete_resp = client.delete(f"/lesson-logs/{lesson['id']}", headers=headers_owner)
+    assert delete_resp.status_code == 204
+    remaining = client.get(f"/classrooms/{classroom['id']}/lesson-logs", headers=headers_owner).json()
+    assert all(row["id"] != lesson["id"] for row in remaining)
+
+    # Only the entry's own teacher (or admin) may edit/delete it.
+    denied_edit = client.patch(
+        f"/lesson-logs/{holiday.json()['id']}", json={"observations": "x"}, headers=headers_other,
+    )
+    assert denied_edit.status_code == 403

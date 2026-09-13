@@ -65,6 +65,26 @@ class SessionStatus(str, Enum):
     closed = "closed"
 
 
+class LessonLogType(str, Enum):
+    """What kind of entry this دفتر النصوص/كراس يومي row is -- the classic
+    paper cahier de textes records more than just "a lesson was taught": a
+    catch-up/remediation slot, a holiday, a whole week given to guided work,
+    all get their own line. Before this, LessonLog assumed every entry was a
+    real lesson tied to a curriculum unit (`curriculum_unit_id` was
+    required) -- which made it impossible to log a holiday or a general
+    support/remediation slot with no specific competency attached. `lesson`
+    is the default so every pre-existing row (all real taught lessons) is
+    correctly backfilled without re-tagging anything.
+    """
+
+    lesson = "lesson"  # درس عادي
+    integration = "integration"  # إدماج
+    guided_work = "guided_work"  # عمل موجَّه
+    remediation = "remediation"  # استدراك
+    support = "support"  # دعم
+    holiday = "holiday"  # عطلة / توقف
+
+
 class SessionEventType(str, Enum):
     attendance_present = "attendance_present"
     attendance_absent = "attendance_absent"

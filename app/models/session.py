@@ -2,7 +2,7 @@ from typing import Optional
 
 from sqlmodel import Field
 
-from app.models.common import SessionEventType, SessionStatus, SyncableModel
+from app.models.common import LessonLogType, SessionEventType, SessionStatus, SyncableModel
 
 
 class ClassSession(SyncableModel, table=True):
@@ -42,6 +42,16 @@ class LessonLog(SyncableModel, table=True):
     """The digital 'cahier de textes' -- what was actually taught, tied to the
     curriculum reference tree so it can be compared against the planned pacing
     (AnnualPlan/PlanItem) to compute an automatic progress/delay indicator.
+
+    `curriculum_unit_id` used to be required, which made it impossible to
+    log anything but a real lesson -- a holiday, a general support/
+    remediation slot, or guided work with no single competency attached all
+    need an entry in the same notebook with no unit to point at. It is now
+    optional and required only for `lesson_type`s that actually cover
+    curriculum content (enforced in the router, not here, since that rule
+    depends on `lesson_type`'s value). `resource` (السند) is the reference
+    material used -- a textbook page, a worksheet, a document -- distinct
+    from `observations` (free-form notes on how the session actually went).
     """
 
     __tablename__ = "lesson_logs"
@@ -50,5 +60,7 @@ class LessonLog(SyncableModel, table=True):
     classroom_id: str = Field(foreign_key="classrooms.id", index=True)
     teacher_id: str = Field(foreign_key="users.id")
     date: str
-    curriculum_unit_id: str = Field(foreign_key="curriculum_units.id")
+    lesson_type: LessonLogType = Field(default=LessonLogType.lesson)
+    curriculum_unit_id: Optional[str] = Field(default=None, foreign_key="curriculum_units.id")
+    resource: Optional[str] = None
     observations: Optional[str] = None
