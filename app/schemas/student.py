@@ -41,6 +41,26 @@ class StudentRead(BaseModel):
     general_notes: Optional[str] = None
 
 
+class StudentImportSkippedRow(BaseModel):
+    row_number: int  # 1-based, matching what a teacher sees if they open the file in Excel (row 1 = header)
+    reason: str
+
+
+class StudentImportResult(BaseModel):
+    """POST /classrooms/{id}/students/import never fails a whole file over
+    one bad row -- a class list of 35 names is exactly the kind of file
+    where row 17 has a typo or a blank cell, and refusing the other 34 over
+    that would be worse than importing them and flagging row 17. `created`
+    lets the roster screen show the new students immediately without a
+    second round-trip; `skipped` lists exactly which rows need a manual fix.
+    """
+
+    created_count: int
+    skipped_count: int
+    created: list[StudentRead]
+    skipped: list[StudentImportSkippedRow]
+
+
 class SeatAssignmentUpsert(BaseModel):
     classroom_id: str
     student_id: str

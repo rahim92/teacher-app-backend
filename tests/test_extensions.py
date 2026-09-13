@@ -2,12 +2,14 @@
 class delegates, per-student special-need visibility, per-term seat maps,
 and the auto-computed behaviour score.
 """
+import io
 import os
 import uuid
 
 os.environ["DATABASE_URL"] = "sqlite:///./test_extensions.db"
 
 from fastapi.testclient import TestClient  # noqa: E402
+from openpyxl import Workbook  # noqa: E402
 
 from app.main import app  # noqa: E402
 
@@ -401,6 +403,96 @@ def test_student_edit_and_soft_delete():
     # Deleting the same student twice is a clean 404, not a crash.
     redelete = client.delete(f"/students/{student['id']}", headers=headers)
     assert redelete.status_code == 404
+
+
+def test_student_roster_bulk_import_from_csv_and_xlsx():
+    """POST /classrooms/{id}/students/import -- the fast path for setting up
+    a whole class list at once instead of one "add student" form at a time.
+    Covers: a CSV with Arabic header aliases and separate first/last-name
+    columns, a blank row silently ignored, a row with no name reported (not
+    silently dropped), an XLSX file with one combined "الاسم الكامل" column
+    that gets split, an unsupported file extension, a header row with no
+    recognizable name column at all, and the classroom-ownership gate
+    refusing a teacher with no relation to the classroom.
+    """
+    headers, _teacher = _register_and_login("import_t")
+    headers_stranger, _stranger = _register_and_login("import_stranger")
+    _year, _term, classroom = _setup_classroom(headers, "1AM - import")
+
+    csv_content = (
+        "الاسم,اللقب,هاتف ولي الأمر\n"
+        "أمين,خالدي,0555000000\n"
+        "\n"
+        "هدى,بن علي,\n"
+        ",,0666111111\n"  # لا اسم رغم وجود بيانات أخرى في الصف -- يجب أن يُبلَّغ لا أن يُتجاهَل كصف فارغ
+    ).encode("utf-8-sig")
+
+    # A teacher with no relation to this classroom cannot bulk-inject a
+    # roster into it -- same gate now enforced on plain create_student too.
+    refused = client.post(
+        f"/classrooms/{classroom['id']}/students/import",
+        files={"file": ("roster.csv", csv_content, "text/csv")},
+        headers=headers_stranger,
+    )
+    assert refused.status_code == 403
+
+    imported = client.post(
+        f"/classrooms/{classroom['id']}/students/import",
+        files={"file": ("roster.csv", csv_content, "text/csv")},
+        headers=headers,
+    )
+    assert imported.status_code == 200, imported.text
+    result = imported.json()
+    assert result["created_count"] == 2
+    assert result["skipped_count"] == 1
+    names = {(s["first_name"], s["last_name"]) for s in result["created"]}
+    assert names == {("أمين", "خالدي"), ("هدى", "بن علي")}
+    by_name = {s["first_name"]: s for s in result["created"]}
+    assert by_name["أمين"]["guardian_phone"] == "0555000000"
+    assert by_name["هدى"]["guardian_phone"] is None  # blank cell -> None, not an empty string
+    assert result["skipped"][0]["row_number"] == 5  # header=1, بلا اسم=صف 5 (الصف الفارغ لا يُحتسَب أصلاً)
+
+    # An .xlsx file with one combined "الاسم الكامل" column instead of two
+    # separate ones -- split naively into (first token, remaining tokens).
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["الاسم الكامل", "الجنس"])
+    sheet.append(["كريم بوعلام مرابط", "ذكر"])
+    xlsx_buffer = io.BytesIO()
+    workbook.save(xlsx_buffer)
+
+    xlsx_imported = client.post(
+        f"/classrooms/{classroom['id']}/students/import",
+        files={"file": ("roster.xlsx", xlsx_buffer.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=headers,
+    )
+    assert xlsx_imported.status_code == 200, xlsx_imported.text
+    xlsx_result = xlsx_imported.json()
+    assert xlsx_result["created_count"] == 1
+    assert xlsx_result["created"][0]["first_name"] == "كريم"
+    assert xlsx_result["created"][0]["last_name"] == "بوعلام مرابط"
+    assert xlsx_result["created"][0]["gender"] == "ذكر"
+
+    # An unsupported extension is refused outright, not silently misread.
+    bad_ext = client.post(
+        f"/classrooms/{classroom['id']}/students/import",
+        files={"file": ("roster.txt", b"anything", "text/plain")},
+        headers=headers,
+    )
+    assert bad_ext.status_code == 400
+
+    # A file whose header row has no recognizable name column is refused
+    # with a clear reason, rather than importing a roster of nameless rows.
+    no_name_column = client.post(
+        f"/classrooms/{classroom['id']}/students/import",
+        files={"file": ("roster.csv", "المادة,الفصل\nرياضيات,الأول\n".encode("utf-8-sig"), "text/csv")},
+        headers=headers,
+    )
+    assert no_name_column.status_code == 400
+
+    # The roster now reflects both imports, on top of the two already there.
+    roster = client.get(f"/classrooms/{classroom['id']}/students", headers=headers).json()
+    assert len(roster) == 3
 
 
 def test_seat_assignment_shared_desk_and_unseat():
