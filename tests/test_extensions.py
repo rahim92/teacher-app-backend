@@ -1199,14 +1199,14 @@ def test_subject_grade_combines_continuous_with_test_and_exam_and_gates_by_subje
 
 def test_lesson_log_richer_types_validation_ownership_and_search():
     """The richer دفتر النصوص/الكراس اليومي: lesson_type + domain/segment/
-    resource free-text fields (typed by the teacher, terminology differs per
-    subject -- not derived from CurriculumUnit), curriculum_unit_id now a
-    fully optional secondary link regardless of lesson_type (dropped the
-    prior "required unless holiday" rule once domain/segment took over as
-    the primary descriptive fields), an ownership check that didn't exist
-    before (create_lesson_log used to accept a log for ANY classroom from
-    ANY authenticated teacher), and edit/delete/search now that a teacher
-    can actually fix or find an entry.
+    lesson_title/completed_phases free-text fields (typed by the teacher,
+    terminology differs per subject -- not derived from CurriculumUnit),
+    curriculum_unit_id now a fully optional secondary link regardless of
+    lesson_type (dropped the prior "required unless holiday" rule once
+    domain/segment took over as the primary descriptive fields), an
+    ownership check that didn't exist before (create_lesson_log used to
+    accept a log for ANY classroom from ANY authenticated teacher), and
+    edit/delete/search now that a teacher can actually fix or find an entry.
     """
     headers_owner, teacher_owner = _register_and_login("journal_owner_t")
     headers_other, _teacher_other = _register_and_login("journal_other_t")
@@ -1222,35 +1222,39 @@ def test_lesson_log_richer_types_validation_ownership_and_search():
     ).json()
 
     # A regular lesson with NO curriculum_unit_id at all is accepted --
-    # domain/segment/resource (all free text) are what a teacher fills in
-    # instead, and curriculum_unit_id is only for those who also want the
-    # pacing indicator.
+    # domain/segment/lesson_title/completed_phases (all free text) are what
+    # a teacher fills in instead, and curriculum_unit_id is only for those
+    # who also want the pacing indicator.
     no_unit_lesson = client.post(
         "/lesson-logs",
         json={
             "classroom_id": classroom["id"], "date": "2025-10-04", "lesson_type": "lesson",
-            "domain": "الأعداد والحساب", "segment": "المقطع 02", "resource": "ورقة عمل مصورة",
+            "domain": "الأعداد والحساب", "segment": "المقطع 02", "lesson_title": "جمع وطرح الأعداد الطبيعية",
+            "completed_phases": "intro,construction",
         },
         headers=headers_owner,
     )
     assert no_unit_lesson.status_code == 200, no_unit_lesson.text
     assert no_unit_lesson.json()["curriculum_unit_id"] is None
     assert no_unit_lesson.json()["domain"] == "الأعداد والحساب"
+    assert no_unit_lesson.json()["completed_phases"] == "intro,construction"
 
-    # A real lesson entry, with domain/segment/resource AND an optional
-    # curriculum_unit_id link (a teacher can use both at once).
+    # A real lesson entry, with domain/segment/lesson_title/completed_phases
+    # AND an optional curriculum_unit_id link (a teacher can use both at once).
     lesson = client.post(
         "/lesson-logs",
         json={
             "classroom_id": classroom["id"], "date": "2025-10-05", "lesson_type": "lesson",
             "curriculum_unit_id": unit["id"], "domain": "الأعداد والحساب", "segment": "المقطع 02",
-            "resource": "الكتاب المدرسي ص24", "observations": "سير جيد للحصة",
+            "lesson_title": "جمع وطرح الأعداد الطبيعية", "completed_phases": "intro,construction,investment,reinvestment",
+            "observations": "سير جيد للحصة",
         },
         headers=headers_owner,
     ).json()
     assert lesson["lesson_type"] == "lesson"
     assert lesson["segment"] == "المقطع 02"
-    assert lesson["resource"] == "الكتاب المدرسي ص24"
+    assert lesson["lesson_title"] == "جمع وطرح الأعداد الطبيعية"
+    assert lesson["completed_phases"] == "intro,construction,investment,reinvestment"
 
     # A holiday entry needs no curriculum_unit_id at all.
     holiday = client.post(

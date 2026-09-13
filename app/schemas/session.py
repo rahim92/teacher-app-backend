@@ -50,7 +50,8 @@ class LessonLogCreate(BaseModel):
     curriculum_unit_id: Optional[str] = None  # optional secondary link -- powers the pacing indicator only, if set
     domain: Optional[str] = None  # الميدان -- typed freely, terminology differs per subject
     segment: Optional[str] = None  # المقطع/الوحدة -- typed freely, terminology differs per subject
-    resource: Optional[str] = None  # المورد/السند: كتاب مدرسي، ورقة عمل، وثيقة...
+    lesson_title: Optional[str] = None  # عنوان الدرس
+    completed_phases: Optional[str] = None  # comma-separated tags -- meaning depends on subject family, see models/session.py
     observations: Optional[str] = None
 
 
@@ -69,5 +70,6 @@ class LessonLogUpdate(BaseModel):
     curriculum_unit_id: Optional[str] = None
     domain: Optional[str] = None
     segment: Optional[str] = None
-    resource: Optional[str] = None
+    lesson_title: Optional[str] = None
+    completed_phases: Optional[str] = None
     observations: Optional[str] = None

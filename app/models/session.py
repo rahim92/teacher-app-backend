@@ -59,9 +59,38 @@ class LessonLog(SyncableModel, table=True):
     (AnnualPlan/PlanItem) -- domain/segment/resource carry no such
     comparison, they are descriptive only.
 
-    `resource` (المورد/السند) is the reference material actually used -- a
-    textbook page, a worksheet, a document -- distinct from `observations`
-    (free-form notes on how the session actually went).
+    `lesson_title` (عنوان الدرس) replaces the old `resource` field (kept as a
+    dead column in the DB, no longer read/written -- no real data existed in
+    it yet so a straight functional replacement was safe): a teacher pointed
+    out that what belongs here is the actual lesson's title/topic, not a
+    reference to supporting material. `completed_phases` (comma-separated
+    keys, e.g. "intro,construction") records which stage(s) of the session
+    were actually completed -- its meaning depends on the subject:
+
+    - For subjects following the competency-based "وضعية-مشكلة" model (maths,
+      sciences, history-geography, civic/Islamic education), it holds a
+      SUBSET of a fixed 4-stage checklist: intro (تمهيد) / construction
+      (البناء المعرفي) / investment (الاستثمار) / reinvestment (إعادة
+      الاستثمار). Confirmed first-hand ONLY for maths (a teacher described
+      the exact structure: 5-minute recall activity -> discovery activity
+      from the textbook/worksheet -> teacher-guided conclusion -> 1-2
+      consolidation exercises); applied as a best-effort DEFAULT to the
+      other subjects in this family pending confirmation from teachers of
+      those subjects (research found partial confirmation for history and
+      Islamic education with slightly different wording -- see
+      docs/data_model.md §33 for sources and confidence levels).
+    - For language subjects (Arabic, French, English), research into real
+      Algerian lesson-prep documents found this 4-stage model does NOT
+      apply at all -- an actual Arabic text-comprehension lesson prep used
+      completely different, content-specific headers. Language subjects
+      instead get exactly ONE session-type tag from a different set:
+      listening / reading / language_activities / oral_expression /
+      written_expression / integration (see §33).
+
+    Both cases reuse the same free-text column rather than two separate
+    ones, since ultimately it is just "which tag(s) describe what happened
+    this session" -- the UI decides which checklist to render based on the
+    subject.
     """
 
     __tablename__ = "lesson_logs"
@@ -74,5 +103,6 @@ class LessonLog(SyncableModel, table=True):
     curriculum_unit_id: Optional[str] = Field(default=None, foreign_key="curriculum_units.id")
     domain: Optional[str] = None
     segment: Optional[str] = None
-    resource: Optional[str] = None
+    lesson_title: Optional[str] = None
+    completed_phases: Optional[str] = None
     observations: Optional[str] = None
