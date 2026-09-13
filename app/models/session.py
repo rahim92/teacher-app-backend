@@ -39,19 +39,29 @@ class SessionEvent(SyncableModel, table=True):
 
 
 class LessonLog(SyncableModel, table=True):
-    """The digital 'cahier de textes' -- what was actually taught, tied to the
-    curriculum reference tree so it can be compared against the planned pacing
-    (AnnualPlan/PlanItem) to compute an automatic progress/delay indicator.
+    """The digital 'cahier de textes' -- what was actually taught.
 
-    `curriculum_unit_id` used to be required, which made it impossible to
-    log anything but a real lesson -- a holiday, a general support/
-    remediation slot, or guided work with no single competency attached all
-    need an entry in the same notebook with no unit to point at. It is now
-    optional and required only for `lesson_type`s that actually cover
-    curriculum content (enforced in the router, not here, since that rule
-    depends on `lesson_type`'s value). `resource` (السند) is the reference
-    material used -- a textbook page, a worksheet, a document -- distinct
-    from `observations` (free-form notes on how the session actually went).
+    `domain` (الميدان) and `segment` (المقطع/الوحدة) are free text, typed by
+    the teacher on every entry -- NOT derived from the CurriculumUnit tree.
+    This was a deliberate reversal of the original design (which tried to
+    make CurriculumUnit the single source of truth for these two levels):
+    the Algerian middle-school curriculum uses genuinely different
+    terminology and structure per subject (e.g. Maths: "ميدان / مقطع تعلمي /
+    مورد معرفي"؛ Arabic: "ميدان / مقطع / سند"؛ French: "مشروع (Projet) / مقطع
+    (Séquence) / سند (Support)"؛ Civic education: "ميدان / مركبة تعلمية /
+    سند" -- confirmed against Algerian "الجيل الثاني" curriculum documents),
+    so no single fixed tree can represent all of them, and a subject-specific
+    "المورد" in particular has many valid values per مقطع depending on which
+    resource the teacher actually used that day. `curriculum_unit_id` stays
+    as an OPTIONAL secondary link (not shown as required in the rich journal
+    screen) purely for teachers who also want the automatic progress/delay
+    indicator that compares this log against the planned pacing
+    (AnnualPlan/PlanItem) -- domain/segment/resource carry no such
+    comparison, they are descriptive only.
+
+    `resource` (المورد/السند) is the reference material actually used -- a
+    textbook page, a worksheet, a document -- distinct from `observations`
+    (free-form notes on how the session actually went).
     """
 
     __tablename__ = "lesson_logs"
@@ -62,5 +72,7 @@ class LessonLog(SyncableModel, table=True):
     date: str
     lesson_type: LessonLogType = Field(default=LessonLogType.lesson)
     curriculum_unit_id: Optional[str] = Field(default=None, foreign_key="curriculum_units.id")
+    domain: Optional[str] = None
+    segment: Optional[str] = None
     resource: Optional[str] = None
     observations: Optional[str] = None

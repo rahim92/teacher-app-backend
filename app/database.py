@@ -30,6 +30,10 @@ _ADDITIVE_COLUMNS = [
     # before lesson_type existed).
     ("lesson_logs", "lesson_type", "VARCHAR(20) NOT NULL DEFAULT 'lesson'"),
     ("lesson_logs", "resource", "TEXT"),
+    # Free-text, teacher-typed -- see models/session.py's docstring for why
+    # these aren't derived from CurriculumUnit.
+    ("lesson_logs", "domain", "TEXT"),
+    ("lesson_logs", "segment", "TEXT"),
 ]
 
 # Columns that used to be NOT NULL but had that constraint deliberately

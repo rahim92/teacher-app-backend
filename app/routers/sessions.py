@@ -61,19 +61,6 @@ def _ensure_teaches_classroom(session: Session, classroom: Classroom, current_us
         raise HTTPException(status_code=403, detail="لا تُدرِّس في هذا القسم، فلا يمكنك الكتابة في كراسه اليومي.")
 
 
-def _ensure_curriculum_unit_required(lesson_type: LessonLogType, curriculum_unit_id: Optional[str]) -> None:
-    """Every lesson_type except `holiday` covers real curriculum content and
-    must point at a unit; a holiday/توقف entry has nothing to point at by
-    definition. Enforced here (not as a DB constraint) since it depends on
-    another field's value, and both create and update need the same check.
-    """
-    if lesson_type != LessonLogType.holiday and not curriculum_unit_id:
-        raise HTTPException(
-            status_code=400,
-            detail="يجب تحديد الوحدة المدروسة لهذا النوع من الحصص (عدا العطلة/التوقف).",
-        )
-
-
 def _get_owned_lesson_log(session: Session, log_id: str, current_user: User) -> LessonLog:
     log = session.get(LessonLog, log_id)
     if not log or log.is_deleted:
@@ -184,18 +171,24 @@ def create_lesson_log(
     attendance/behavior taps, not curriculum pacing. Rather than bolting a
     curriculum-unit picker onto that unrelated flow, the annual-plan screen
     calls this endpoint directly to record "this planned unit was delivered
-    on this date", and the richer دفتر النصوص screen (lesson_type/resource/
-    observations, any lesson_type including non-curriculum ones like a
-    holiday) also calls it directly. Both/all paths write the same
-    LessonLog table, so `GET /classrooms/{id}/lesson-logs` and the
+    on this date", and the richer دفتر النصوص screen (lesson_type/domain/
+    segment/resource/observations, any lesson_type including non-curriculum
+    ones like a holiday) also calls it directly. Both/all paths write the
+    same LessonLog table, so `GET /classrooms/{id}/lesson-logs` and the
     pacing-progress indicator see entries from any of them without caring
     which screen created them.
+
+    `curriculum_unit_id` is never required here regardless of `lesson_type`
+    (a prior version of this check enforced it for every type except
+    `holiday` -- removed once `domain`/`segment`/`resource` became the
+    primary teacher-typed fields; see models/session.py's docstring for why).
+    A teacher who wants the automatic pacing indicator still sets it; one who
+    doesn't just describes the lesson in plain Arabic instead.
     """
     classroom = session.get(Classroom, payload.classroom_id)
     if not classroom or classroom.is_deleted:
         raise HTTPException(status_code=404, detail="القسم غير موجود")
     _ensure_teaches_classroom(session, classroom, current_user)
-    _ensure_curriculum_unit_required(payload.lesson_type, payload.curriculum_unit_id)
 
     log = LessonLog(**payload.model_dump(), teacher_id=current_user.id)
     session.add(log)
@@ -213,9 +206,6 @@ def update_lesson_log(
 ):
     log = _get_owned_lesson_log(session, log_id, current_user)
     updates = payload.model_dump(exclude_unset=True)
-    new_type = updates.get("lesson_type", log.lesson_type)
-    new_unit = updates.get("curriculum_unit_id", log.curriculum_unit_id)
-    _ensure_curriculum_unit_required(new_type, new_unit)
 
     for field, value in updates.items():
         setattr(log, field, value)

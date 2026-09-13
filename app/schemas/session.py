@@ -47,8 +47,10 @@ class LessonLogCreate(BaseModel):
     classroom_id: str
     date: str
     lesson_type: LessonLogType = LessonLogType.lesson
-    curriculum_unit_id: Optional[str] = None  # required unless lesson_type is "holiday" -- enforced in the router
-    resource: Optional[str] = None  # السند: كتاب مدرسي، ورقة عمل، وثيقة...
+    curriculum_unit_id: Optional[str] = None  # optional secondary link -- powers the pacing indicator only, if set
+    domain: Optional[str] = None  # الميدان -- typed freely, terminology differs per subject
+    segment: Optional[str] = None  # المقطع/الوحدة -- typed freely, terminology differs per subject
+    resource: Optional[str] = None  # المورد/السند: كتاب مدرسي، ورقة عمل، وثيقة...
     observations: Optional[str] = None
 
 
@@ -65,5 +67,7 @@ class LessonLogUpdate(BaseModel):
     date: Optional[str] = None
     lesson_type: Optional[LessonLogType] = None
     curriculum_unit_id: Optional[str] = None
+    domain: Optional[str] = None
+    segment: Optional[str] = None
     resource: Optional[str] = None
     observations: Optional[str] = None

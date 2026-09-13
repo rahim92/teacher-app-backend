@@ -1198,11 +1198,15 @@ def test_subject_grade_combines_continuous_with_test_and_exam_and_gates_by_subje
 
 
 def test_lesson_log_richer_types_validation_ownership_and_search():
-    """The richer دفتر النصوص/الكراس اليومي: lesson_type + resource fields,
-    curriculum_unit_id now optional (only a "هولاية/توقف" entry can omit it),
-    an ownership check that didn't exist before (create_lesson_log used to
-    accept a log for ANY classroom from ANY authenticated teacher), and
-    edit/delete/search now that a teacher can actually fix or find an entry.
+    """The richer دفتر النصوص/الكراس اليومي: lesson_type + domain/segment/
+    resource free-text fields (typed by the teacher, terminology differs per
+    subject -- not derived from CurriculumUnit), curriculum_unit_id now a
+    fully optional secondary link regardless of lesson_type (dropped the
+    prior "required unless holiday" rule once domain/segment took over as
+    the primary descriptive fields), an ownership check that didn't exist
+    before (create_lesson_log used to accept a log for ANY classroom from
+    ANY authenticated teacher), and edit/delete/search now that a teacher
+    can actually fix or find an entry.
     """
     headers_owner, teacher_owner = _register_and_login("journal_owner_t")
     headers_other, _teacher_other = _register_and_login("journal_other_t")
@@ -1217,25 +1221,35 @@ def test_lesson_log_richer_types_validation_ownership_and_search():
         headers=headers_owner,
     ).json()
 
-    # A regular lesson without curriculum_unit_id is rejected -- only a
-    # holiday entry may omit it.
-    missing_unit = client.post(
+    # A regular lesson with NO curriculum_unit_id at all is accepted --
+    # domain/segment/resource (all free text) are what a teacher fills in
+    # instead, and curriculum_unit_id is only for those who also want the
+    # pacing indicator.
+    no_unit_lesson = client.post(
         "/lesson-logs",
-        json={"classroom_id": classroom["id"], "date": "2025-10-05", "lesson_type": "lesson"},
+        json={
+            "classroom_id": classroom["id"], "date": "2025-10-04", "lesson_type": "lesson",
+            "domain": "الأعداد والحساب", "segment": "المقطع 02", "resource": "ورقة عمل مصورة",
+        },
         headers=headers_owner,
     )
-    assert missing_unit.status_code == 400
+    assert no_unit_lesson.status_code == 200, no_unit_lesson.text
+    assert no_unit_lesson.json()["curriculum_unit_id"] is None
+    assert no_unit_lesson.json()["domain"] == "الأعداد والحساب"
 
-    # A real lesson entry, with the new resource field.
+    # A real lesson entry, with domain/segment/resource AND an optional
+    # curriculum_unit_id link (a teacher can use both at once).
     lesson = client.post(
         "/lesson-logs",
         json={
             "classroom_id": classroom["id"], "date": "2025-10-05", "lesson_type": "lesson",
-            "curriculum_unit_id": unit["id"], "resource": "الكتاب المدرسي ص24", "observations": "سير جيد للحصة",
+            "curriculum_unit_id": unit["id"], "domain": "الأعداد والحساب", "segment": "المقطع 02",
+            "resource": "الكتاب المدرسي ص24", "observations": "سير جيد للحصة",
         },
         headers=headers_owner,
     ).json()
     assert lesson["lesson_type"] == "lesson"
+    assert lesson["segment"] == "المقطع 02"
     assert lesson["resource"] == "الكتاب المدرسي ص24"
 
     # A holiday entry needs no curriculum_unit_id at all.
@@ -1271,7 +1285,7 @@ def test_lesson_log_richer_types_validation_ownership_and_search():
     assert len(narrow_range) == 1 and narrow_range[0]["id"] == holiday.json()["id"]
 
     # Edit: fixing the lesson's observations shouldn't require resending
-    # curriculum_unit_id (partial update).
+    # curriculum_unit_id/domain/segment (partial update).
     patched = client.patch(
         f"/lesson-logs/{lesson['id']}",
         json={"observations": "تعديل: سير ممتاز للحصة"},
@@ -1279,15 +1293,18 @@ def test_lesson_log_richer_types_validation_ownership_and_search():
     ).json()
     assert patched["observations"] == "تعديل: سير ممتاز للحصة"
     assert patched["curriculum_unit_id"] == unit["id"]  # untouched by the partial update
+    assert patched["segment"] == "المقطع 02"  # untouched by the partial update
 
-    # Edit: switching an entry to a type that needs a unit, while removing
-    # it at the same time, is rejected.
-    bad_switch = client.patch(
+    # Edit: switching a holiday entry to a type that would have required a
+    # unit under the old rule now succeeds -- domain/segment/curriculum_unit
+    # are all optional regardless of lesson_type.
+    switched = client.patch(
         f"/lesson-logs/{holiday.json()['id']}",
-        json={"lesson_type": "remediation"},
+        json={"lesson_type": "remediation", "domain": "معالجة عامة"},
         headers=headers_owner,
     )
-    assert bad_switch.status_code == 400
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["lesson_type"] == "remediation"
 
     # Delete: soft-deleted entries drop out of the listing.
     delete_resp = client.delete(f"/lesson-logs/{lesson['id']}", headers=headers_owner)
