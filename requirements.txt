@@ -12,6 +12,16 @@ email-validator==2.2.0
 celery==5.4.0
 redis==5.0.8
 weasyprint==62.3
+# Pinned explicitly: weasyprint==62.3 declares "pydyf>=0.10.0" (loose) but
+# is NOT actually compatible with pydyf 0.12.x at runtime -- pip installs
+# the latest pydyf that satisfies the loose constraint, which breaks PDF
+# generation with "AttributeError: 'super' object has no attribute
+# 'transform'" the moment HTML(...).write_pdf() is actually called (import
+# itself succeeds, so this is NOT caught by the `except ImportError` in
+# export.py). Found via GET /health/pdf-engine, a temporary diagnostic
+# route added specifically to verify this on the real Render deployment --
+# see docs/data_model.md §41.
+pydyf==0.11.0
 jinja2==3.1.4
 openpyxl==3.1.5
 pytest==8.3.3
