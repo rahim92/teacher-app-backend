@@ -207,9 +207,14 @@ def test_seat_assignment_per_term_and_behavior_score():
     # materials: only the 1 "missing" tap counts -- the 2 "brought" taps are
     # inert -- so it's penalty_score(1 tap) off the default max of 2 = 1.5.
     assert breakdown["materials"]["points_earned"] == 1.5
-    # notebook (تنظيم الكراس): average of the two checks' `quality`
-    # (organized=1.0, neglected=0.0) -> 0.5 * max of 1 = 0.5.
-    assert breakdown["notebook"]["points_earned"] == 0.5
+    # notebook (تنظيم الكراس، §43): reflects only the MOST RECENT check's
+    # `quality`, not an average of every check this term -- the later check
+    # (2025-10-20, "neglected") wins over the earlier one (2025-10-15,
+    # "organized") regardless of insertion order, so 0.0 * max of 1 = 0.0.
+    # See test_notebook_quality_score_reflects_latest_check_not_average
+    # below for the dedicated coverage of this rule (including the reverse
+    # order: an older weak check must NOT drag down a newer strong one).
+    assert breakdown["notebook"]["points_earned"] == 0.0
     # participation (merged with الفعالية, max 5): 4 taps * 0.5/tap = 2.0.
     assert breakdown["participation"]["points_earned"] == 2.0
     # writing (الكتابة): only ONE check recorded writing_quality (average=0.5)
@@ -224,6 +229,66 @@ def test_seat_assignment_per_term_and_behavior_score():
     assert breakdown["initiative"]["points_earned"] == breakdown["initiative"]["points_max"]
     assert score["total_max"] == 20
     assert score["total"] <= score["total_max"]
+
+
+def test_notebook_quality_score_reflects_latest_check_not_average():
+    """§43: 'تنظيم الكراس' must reflect the notebook's CURRENT state (the
+    most recent check this term), not an average diluted by older checks --
+    a teacher reported the opposite (average) behaviour as a bug after an
+    old weak check kept dragging the score down even though the notebook
+    had since become organized. 'الكتابة' (writing) is a deliberately
+    different, still-cumulative rubric and must stay averaged -- checked
+    here too, side by side, to prove the fix didn't leak into it.
+    """
+    headers, _teacher = _register_and_login("nb_latest_t")
+    _year, term, classroom = _setup_classroom(headers, "1AM - notebook")
+    student = client.post(
+        "/students", json={"classroom_id": classroom["id"], "first_name": "سارة", "last_name": "حمدي"}, headers=headers
+    ).json()
+
+    def check(check_date, quality, writing_quality=None):
+        client.post(
+            "/notebook-checks",
+            json={"student_id": student["id"], "check_date": check_date, "quality": quality, "writing_quality": writing_quality},
+            headers=headers,
+        )
+
+    def notebook_and_writing():
+        score = client.get(
+            f"/students/{student['id']}/behavior-score",
+            params={"classroom_id": classroom["id"], "term_id": term["id"]},
+            headers=headers,
+        ).json()
+        breakdown = {b["category"]: b for b in score["breakdown"]}
+        return breakdown["notebook"]["points_earned"], breakdown["writing"]["points_earned"]
+
+    # Posted deliberately OUT of chronological order, to prove the rule
+    # sorts by check_date (the pedagogical date), not insertion/API-call
+    # order: an earlier-DATED weak check posted SECOND must not win just
+    # because it arrived later over the wire.
+    check("2025-10-05", "neglected", "neglected")  # posted 1st, earliest date
+    check("2025-10-25", "organized", "average")     # posted 2nd, LATEST date so far
+    check("2025-10-15", "average", "organized")     # posted 3rd, but a MIDDLE date -- must not win
+    notebook, writing = notebook_and_writing()
+    # notebook: latest BY DATE is 2025-10-25 ("organized") -> full marks (1 * max of 1).
+    assert notebook == 1.0
+    # writing: average of all three writing_quality ratings (neglected=0,
+    # average=0.5, organized=1.0 -> mean 0.5) * max of 2 = 1.0 -- unaffected
+    # by the notebook fix, still genuinely cumulative.
+    assert writing == 1.0
+
+    # A NEWER but WEAKER check must pull the notebook score back down --
+    # this is not "best check ever wins", it's genuinely "most recent wins".
+    check("2025-11-01", "neglected")
+    notebook, _writing = notebook_and_writing()
+    assert notebook == 0.0
+
+    # Same-day tie: a second check logged for the SAME check_date breaks the
+    # tie on insertion order (created_at) -- the one entered later (more
+    # current information) wins, exactly like the primary case above.
+    check("2025-11-01", "organized")
+    notebook, _writing = notebook_and_writing()
+    assert notebook == 1.0
 
 
 def test_session_event_edit_and_undo_correct_a_mis_tap():

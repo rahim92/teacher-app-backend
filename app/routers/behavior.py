@@ -44,11 +44,20 @@ Every category falls into exactly one of three scoring shapes:
     homework/teamwork reads: homework now reads `homework_done` (not
     `homework_missing`) and teamwork now reads `teamwork_positive` (not
     `teamwork_negative`). See docs/data_model.md §34.
-  - quality_average_score (notebook, writing): the average quality rating
-    from periodic notebook checks (NotebookCheck.quality/writing_quality,
-    see models/student.py), not taps at all. A student with zero checks
-    gets full marks (no evidence against them yet), same rationale as
-    penalty_score's default.
+  - quality_latest_score (notebook only, تنظيم الكراس): the quality rating
+    from the MOST RECENT notebook check this term (NotebookCheck.quality,
+    see models/student.py), not an average -- this category reflects the
+    notebook's current state, so an old weaker check must not keep dragging
+    the score down after a later check found it organized. Explicit
+    correction requested by the teacher (§43) after the opposite
+    (term-wide-average) behaviour misrepresented an already-fixed notebook.
+  - quality_average_score (writing/الكتابة only): the average quality
+    rating across every periodic check this term (NotebookCheck.
+    writing_quality) -- deliberately still cumulative, unlike notebook
+    organization above: "الكتابة" tracks accumulated board/notebook work
+    over the whole term, not a single current state.
+  Both default to full marks with zero checks this term (no evidence
+  against the student yet), same rationale as penalty_score's default.
 """
 from collections import defaultdict
 
@@ -213,7 +222,25 @@ def compute_behavior_score(
             return max_points
         return max_points * (sum(quality_weight[q] for q in rated) / len(rated))
 
-    notebook_points = quality_average_score(lambda c: c.quality, weights["notebook"])
+    def quality_latest_score(quality_of, max_points: float) -> float:
+        # "تنظيم الكراس" reflects the notebook's CURRENT state -- only the
+        # most recent check this term, not an average of every check made
+        # so far. Explicit correction requested by the teacher: an earlier,
+        # weaker check was dragging the score down even after the notebook
+        # had since become "منظَّم", which misrepresents its present state
+        # (unlike "الكتابة", a genuinely cumulative dorsal-work rubric that
+        # intentionally stays averaged via quality_average_score above).
+        # Ties on check_date (two checks logged the same calendar day) break
+        # on created_at -- the one entered later wins, same "most current
+        # information available" rule.
+        dated = [(c.check_date, c.created_at, quality_of(c)) for c in notebook_checks if quality_of(c) is not None]
+        if not dated:
+            return max_points  # no evidence yet this term -- same full-marks-by-default rule as every other category
+        dated.sort(key=lambda row: (row[0], row[1]))
+        latest_quality = dated[-1][2]
+        return max_points * quality_weight[latest_quality]
+
+    notebook_points = quality_latest_score(lambda c: c.quality, weights["notebook"])
     writing_points = quality_average_score(lambda c: c.writing_quality, weights["writing"])
 
     breakdown = [
