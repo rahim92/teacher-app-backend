@@ -15,3 +15,23 @@ class BehaviorScore(BaseModel):
     total: float
     total_max: float
     breakdown: list[BehaviorCategoryScore]
+
+
+class BehaviorWeights(BaseModel):
+    """The nine official-sheet category maxima, always all nine together --
+    see Classroom.weight_* in app/models/identity.py for why there is no
+    partial-override shape."""
+
+    conduct: float
+    attendance: float
+    materials: float
+    notebook: float
+    participation: float
+    writing: float
+    homework: float
+    teamwork: float
+    initiative: float
+
+
+class BehaviorWeightsRead(BehaviorWeights):
+    is_custom: bool  # False => these are DEFAULT_WEIGHTS, not a saved override

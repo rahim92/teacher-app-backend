@@ -61,7 +61,8 @@ from app.models.common import NotebookQuality
 from app.models.identity import Classroom, Term, User
 from app.models.session import ClassSession, SessionEvent
 from app.models.student import NotebookCheck, Student
-from app.schemas.behavior import BehaviorCategoryScore, BehaviorScore
+from app.routers.students import _ensure_can_manage_classroom_roster
+from app.schemas.behavior import BehaviorCategoryScore, BehaviorScore, BehaviorWeights, BehaviorWeightsRead
 
 router = APIRouter(tags=["behavior"])
 
@@ -94,6 +95,31 @@ LABELS_AR = {
 # +٥/-٥ half-point granularity already implies for "الغيابات والتأخيرات".
 POINTS_PER_TAP = 0.5
 
+# Classroom.weight_* column name for each DEFAULT_WEIGHTS/BehaviorWeights key.
+_WEIGHT_COLUMNS = {
+    "conduct": "weight_conduct",
+    "attendance": "weight_attendance",
+    "materials": "weight_materials",
+    "notebook": "weight_notebook",
+    "participation": "weight_participation",
+    "writing": "weight_writing",
+    "homework": "weight_homework",
+    "teamwork": "weight_teamwork",
+    "initiative": "weight_initiative",
+}
+
+
+def _classroom_custom_weights(classroom: Classroom) -> dict | None:
+    """A classroom's saved weight override (§37), or None if it has never
+    saved one. All nine columns are written together by the PUT endpoint
+    below and never partially (see Classroom.weight_* docstring), so any one
+    of them being unset means "no override at all", not a partial one.
+    """
+    values = {key: getattr(classroom, column) for key, column in _WEIGHT_COLUMNS.items()}
+    if any(v is None for v in values.values()):
+        return None
+    return values
+
 
 def compute_behavior_score(
     session: Session,
@@ -105,12 +131,14 @@ def compute_behavior_score(
     """The actual computation behind GET /students/{id}/behavior-score,
     factored out so other modules (grades.py, for the new subject-term
     average; council.py) can get a student's continuous-assessment total
-    without an HTTP round-trip. `weights` defaults to DEFAULT_WEIGHTS (the
-    official split) -- callers that don't need the override-query-params
-    feature should just omit it.
+    without an HTTP round-trip. `weights` is resolved in priority order when
+    not passed explicitly: an explicit override (the query-params on the
+    standalone endpoint below) beats the classroom's saved settings (§37,
+    `PUT /classrooms/{id}/behavior-weights`) beats DEFAULT_WEIGHTS (the
+    official split) -- so grades.py/council.py, which never pass `weights`
+    at all, automatically honor whatever a classroom has saved, exactly like
+    the standalone endpoint does when called with no query params.
     """
-    weights = weights or DEFAULT_WEIGHTS
-
     student = session.get(Student, student_id)
     if not student or student.is_deleted:
         raise HTTPException(status_code=404, detail="التلميذ غير موجود")
@@ -120,6 +148,8 @@ def compute_behavior_score(
     term = session.get(Term, term_id)
     if not term or term.is_deleted:
         raise HTTPException(status_code=404, detail="الفصل الدراسي غير موجود")
+
+    weights = weights or _classroom_custom_weights(classroom) or DEFAULT_WEIGHTS
 
     # Cross-teacher taps by design: like the council report, "السلوك" is a
     # single combined grade covering the student's whole classroom conduct,
@@ -248,19 +278,26 @@ def get_behavior_score(
     student_id: str,
     classroom_id: str,
     term_id: str,
-    w_conduct: float = Query(default=DEFAULT_WEIGHTS["conduct"]),
-    w_attendance: float = Query(default=DEFAULT_WEIGHTS["attendance"]),
-    w_materials: float = Query(default=DEFAULT_WEIGHTS["materials"]),
-    w_notebook: float = Query(default=DEFAULT_WEIGHTS["notebook"]),
-    w_participation: float = Query(default=DEFAULT_WEIGHTS["participation"]),
-    w_writing: float = Query(default=DEFAULT_WEIGHTS["writing"]),
-    w_homework: float = Query(default=DEFAULT_WEIGHTS["homework"]),
-    w_teamwork: float = Query(default=DEFAULT_WEIGHTS["teamwork"]),
-    w_initiative: float = Query(default=DEFAULT_WEIGHTS["initiative"]),
+    # None (not DEFAULT_WEIGHTS) by default -- so we can tell "caller didn't
+    # ask for an override" apart from "caller explicitly wants the official
+    # default", and let a classroom's saved §37 settings apply in the first
+    # case exactly like every other caller of compute_behavior_score. A
+    # caller may still override just one or two categories; the rest fall
+    # back to the classroom's saved weights (or DEFAULT_WEIGHTS), not to a
+    # silently-reset official value for the categories it didn't mention.
+    w_conduct: float | None = Query(default=None),
+    w_attendance: float | None = Query(default=None),
+    w_materials: float | None = Query(default=None),
+    w_notebook: float | None = Query(default=None),
+    w_participation: float | None = Query(default=None),
+    w_writing: float | None = Query(default=None),
+    w_homework: float | None = Query(default=None),
+    w_teamwork: float | None = Query(default=None),
+    w_initiative: float | None = Query(default=None),
     session: Session = Depends(get_session),
     _: User = Depends(get_current_user),
 ) -> BehaviorScore:
-    weights = {
+    overrides = {
         "conduct": w_conduct,
         "attendance": w_attendance,
         "materials": w_materials,
@@ -271,4 +308,81 @@ def get_behavior_score(
         "teamwork": w_teamwork,
         "initiative": w_initiative,
     }
+    overrides = {k: v for k, v in overrides.items() if v is not None}
+    weights = None
+    if overrides:
+        classroom = session.get(Classroom, classroom_id)
+        base = (_classroom_custom_weights(classroom) if classroom else None) or DEFAULT_WEIGHTS
+        weights = {**base, **overrides}
     return compute_behavior_score(session, student_id, classroom_id, term_id, weights)
+
+
+@router.get("/classrooms/{classroom_id}/behavior-weights", response_model=BehaviorWeightsRead)
+def get_behavior_weights(
+    classroom_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> BehaviorWeightsRead:
+    """§37: the settings screen reads this to show either the classroom's
+    saved override or the official defaults (with is_custom telling it
+    which, so it can show a "قيم افتراضية" vs "قيم مخصَّصة" indicator)."""
+    classroom = session.get(Classroom, classroom_id)
+    if not classroom or classroom.is_deleted:
+        raise HTTPException(status_code=404, detail="القسم غير موجود")
+    _ensure_can_manage_classroom_roster(session, classroom, current_user)
+    custom = _classroom_custom_weights(classroom)
+    return BehaviorWeightsRead(is_custom=custom is not None, **(custom or DEFAULT_WEIGHTS))
+
+
+@router.put("/classrooms/{classroom_id}/behavior-weights", response_model=BehaviorWeightsRead)
+def update_behavior_weights(
+    classroom_id: str,
+    payload: BehaviorWeights,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> BehaviorWeightsRead:
+    """Saves all nine category maxima together (never a partial update --
+    see Classroom.weight_* docstring). Every future behavior-score
+    computation for this classroom (the standalone endpoint with no query
+    overrides, grades.py, council.py) picks this up automatically through
+    compute_behavior_score's fallback chain."""
+    classroom = session.get(Classroom, classroom_id)
+    if not classroom or classroom.is_deleted:
+        raise HTTPException(status_code=404, detail="القسم غير موجود")
+    _ensure_can_manage_classroom_roster(session, classroom, current_user)
+
+    values = payload.model_dump()
+    if any(v < 0 for v in values.values()):
+        raise HTTPException(status_code=400, detail="لا يمكن أن تكون علامة أي خانة سالبة")
+    total = sum(values.values())
+    if abs(total - 20.0) > 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail=f"مجموع الخانات التسع يجب أن يساوي 20 تماماً (المجموع الحالي: {round(total, 2)})",
+        )
+
+    for key, column in _WEIGHT_COLUMNS.items():
+        setattr(classroom, column, values[key])
+    session.add(classroom)
+    session.commit()
+    session.refresh(classroom)
+    return BehaviorWeightsRead(is_custom=True, **values)
+
+
+@router.delete("/classrooms/{classroom_id}/behavior-weights", status_code=204)
+def reset_behavior_weights(
+    classroom_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Reverts to the official split -- e.g. after experimenting with a
+    custom split that turned out not to fit. Soft-reset (NULLs all nine
+    columns) rather than deleting the Classroom row, obviously."""
+    classroom = session.get(Classroom, classroom_id)
+    if not classroom or classroom.is_deleted:
+        raise HTTPException(status_code=404, detail="القسم غير موجود")
+    _ensure_can_manage_classroom_roster(session, classroom, current_user)
+    for column in _WEIGHT_COLUMNS.values():
+        setattr(classroom, column, None)
+    session.add(classroom)
+    session.commit()

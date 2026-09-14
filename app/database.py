@@ -39,6 +39,20 @@ _ADDITIVE_COLUMNS = [
     ("lesson_logs", "segment", "TEXT"),
     ("lesson_logs", "lesson_title", "TEXT"),
     ("lesson_logs", "completed_phases", "TEXT"),
+    # Per-classroom behavior-score weight overrides -- NULL (the default,
+    # left untouched by any existing row) means "use the official split".
+    # `FLOAT` is spelled identically for SQLite (type-affinity, accepts any
+    # name) and PostgreSQL (an alias for double precision), so one DDL
+    # string works for both dialects like every other row in this list.
+    ("classrooms", "weight_conduct", "FLOAT"),
+    ("classrooms", "weight_attendance", "FLOAT"),
+    ("classrooms", "weight_materials", "FLOAT"),
+    ("classrooms", "weight_notebook", "FLOAT"),
+    ("classrooms", "weight_participation", "FLOAT"),
+    ("classrooms", "weight_writing", "FLOAT"),
+    ("classrooms", "weight_homework", "FLOAT"),
+    ("classrooms", "weight_teamwork", "FLOAT"),
+    ("classrooms", "weight_initiative", "FLOAT"),
 ]
 
 # Columns that used to be NOT NULL but had that constraint deliberately

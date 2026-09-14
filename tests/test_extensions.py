@@ -1500,3 +1500,95 @@ def test_lesson_log_richer_types_validation_ownership_and_search():
         f"/lesson-logs/{holiday.json()['id']}", json={"observations": "x"}, headers=headers_other,
     )
     assert denied_edit.status_code == 403
+
+
+def test_behavior_weight_settings_customize_score_reset_and_are_ownership_gated():
+    """§37: a settings screen lets a teacher move the official split's nine
+    category maxima around (still summing to 20) instead of being stuck
+    with it -- and every existing consumer of compute_behavior_score
+    (the standalone endpoint with no query overrides, and by extension
+    grades.py/council.py) must pick the saved split up automatically."""
+    headers, _teacher = _register_and_login("weights_t")
+    headers_other, _ = _register_and_login("weights_stranger")
+    _year, term, classroom = _setup_classroom(headers, "3AM - weights")
+    student = client.post(
+        "/students", json={"classroom_id": classroom["id"], "first_name": "نور", "last_name": "حمدي"}, headers=headers
+    ).json()
+
+    # Before any customization: the official split, is_custom False.
+    defaults = client.get(f"/classrooms/{classroom['id']}/behavior-weights", headers=headers).json()
+    assert defaults["is_custom"] is False
+    assert defaults == {
+        "conduct": 2.0, "attendance": 2.0, "materials": 2.0, "notebook": 1.0,
+        "participation": 5.0, "writing": 2.0, "homework": 3.0, "teamwork": 2.0,
+        "initiative": 1.0, "is_custom": False,
+    }
+
+    custom = {
+        "conduct": 5.0, "attendance": 1.0, "materials": 1.0, "notebook": 1.0,
+        "participation": 5.0, "writing": 1.0, "homework": 3.0, "teamwork": 2.0,
+        "initiative": 1.0,
+    }
+    assert sum(custom.values()) == 20.0
+
+    # Rejected: doesn't sum to 20.
+    bad_sum = dict(custom, conduct=6.0)
+    resp = client.put(f"/classrooms/{classroom['id']}/behavior-weights", json=bad_sum, headers=headers)
+    assert resp.status_code == 400 and "20" in resp.json()["detail"]
+
+    # Rejected: a negative category.
+    bad_negative = dict(custom, conduct=-1.0, attendance=custom["attendance"] + 6.0)
+    resp = client.put(f"/classrooms/{classroom['id']}/behavior-weights", json=bad_negative, headers=headers)
+    assert resp.status_code == 400
+
+    # A stranger teacher (no relation to this classroom) may not read or write it.
+    assert client.get(f"/classrooms/{classroom['id']}/behavior-weights", headers=headers_other).status_code == 403
+    assert client.put(f"/classrooms/{classroom['id']}/behavior-weights", json=custom, headers=headers_other).status_code == 403
+
+    # Valid save.
+    saved = client.put(f"/classrooms/{classroom['id']}/behavior-weights", json=custom, headers=headers)
+    assert saved.status_code == 200
+    assert saved.json() == {**custom, "is_custom": True}
+    reread = client.get(f"/classrooms/{classroom['id']}/behavior-weights", headers=headers).json()
+    assert reread == {**custom, "is_custom": True}
+
+    # A fresh behavior-score call (no w_* query params at all) automatically
+    # picks up the classroom's saved split -- max per category matches
+    # `custom`, not DEFAULT_WEIGHTS, even though nothing was tapped yet.
+    score = client.get(
+        f"/students/{student['id']}/behavior-score",
+        params={"classroom_id": classroom["id"], "term_id": term["id"]},
+        headers=headers,
+    ).json()
+    breakdown = {b["category"]: b for b in score["breakdown"]}
+    assert breakdown["conduct"]["points_max"] == 5.0
+    assert breakdown["conduct"]["points_earned"] == 5.0  # penalty category, zero taps -> full marks
+    assert breakdown["participation"]["points_max"] == 5.0
+    assert breakdown["participation"]["points_earned"] == 0.0  # bonus category, zero taps -> zero
+    assert score["total_max"] == 20.0
+
+    # An explicit query override for ONE category layers on top of the
+    # classroom's saved split, not on top of DEFAULT_WEIGHTS -- attendance
+    # here stays at the custom 1.0, not silently reset to the official 2.0.
+    overridden = client.get(
+        f"/students/{student['id']}/behavior-score",
+        params={"classroom_id": classroom["id"], "term_id": term["id"], "w_conduct": 10.0},
+        headers=headers,
+    ).json()
+    overridden_breakdown = {b["category"]: b for b in overridden["breakdown"]}
+    assert overridden_breakdown["conduct"]["points_max"] == 10.0
+    assert overridden_breakdown["attendance"]["points_max"] == 1.0
+
+    # Reset reverts to the official split.
+    assert client.delete(f"/classrooms/{classroom['id']}/behavior-weights", headers=headers_other).status_code == 403
+    reset_resp = client.delete(f"/classrooms/{classroom['id']}/behavior-weights", headers=headers)
+    assert reset_resp.status_code == 204
+    after_reset = client.get(f"/classrooms/{classroom['id']}/behavior-weights", headers=headers).json()
+    assert after_reset["is_custom"] is False and after_reset["conduct"] == 2.0
+    score_after_reset = client.get(
+        f"/students/{student['id']}/behavior-score",
+        params={"classroom_id": classroom["id"], "term_id": term["id"]},
+        headers=headers,
+    ).json()
+    assert score_after_reset["total_max"] == 20.0
+    assert {b["category"]: b["points_max"] for b in score_after_reset["breakdown"]}["conduct"] == 2.0

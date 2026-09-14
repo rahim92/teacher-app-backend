@@ -83,6 +83,26 @@ class Classroom(SyncableModel, table=True):
     name: str  # e.g. "3AM - 2"
     grade_level: GradeLevel
 
+    # Per-classroom override of the official "كشف تنقيط المراقبة المستمرة"
+    # category weights (see app/routers/behavior.py's DEFAULT_WEIGHTS and
+    # docs/data_model.md §37). All nine are set together or not at all --
+    # NULL (the default for every one) means "use the official split";
+    # there is deliberately no partial-override state, since a mix of some
+    # custom/some-default weights could silently stop summing to 20. Stored
+    # directly on Classroom rather than a separate settings table: this is a
+    # 1:1 "settings for this classroom" concept with no independent identity
+    # of its own, so a join for every behavior-score computation (which
+    # already loads the Classroom row anyway) would be pure overhead.
+    weight_conduct: Optional[float] = None
+    weight_attendance: Optional[float] = None
+    weight_materials: Optional[float] = None
+    weight_notebook: Optional[float] = None
+    weight_participation: Optional[float] = None
+    weight_writing: Optional[float] = None
+    weight_homework: Optional[float] = None
+    weight_teamwork: Optional[float] = None
+    weight_initiative: Optional[float] = None
+
 
 class TeacherClassroomAssignment(SyncableModel, table=True):
     """Which teacher teaches which subject in which classroom, this year.
