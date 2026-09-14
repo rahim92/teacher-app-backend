@@ -10,7 +10,7 @@ from datetime import date
 os.environ["DATABASE_URL"] = "sqlite:///./test_extensions.db"
 
 from fastapi.testclient import TestClient  # noqa: E402
-from openpyxl import Workbook  # noqa: E402
+from openpyxl import Workbook, load_workbook  # noqa: E402
 
 from app.main import app  # noqa: E402
 
@@ -1693,3 +1693,93 @@ def test_classroom_alerts_flag_absences_stale_notebooks_and_ungraded_assessments
         f"/classrooms/{classroom['id']}/alerts", params={"term_id": term["id"], "min_absences": 5}, headers=headers
     ).json()
     assert loose["repeated_absence"] == []
+
+
+def test_classroom_full_backup_export_xlsx_and_is_homeroom_gated():
+    """§39: a one-click downloadable Excel workbook backing up a whole
+    classroom's data for one term (roster, behavior score, assessments,
+    raw attendance/behavior log, notebook checks) -- gated exactly like the
+    council report (homeroom teacher or admin only), since it crosses
+    subject/teacher boundaries the same way that report does."""
+    headers, teacher = _register_and_login("backup_t")
+    headers_other, _ = _register_and_login("backup_stranger")
+    year, term, classroom = _setup_classroom(headers, "1AM - backup")
+    subject = client.post("/subjects", json={"name": "الرياضيات"}, headers=headers).json()
+    client.post("/teacher-classroom-assignments", json={
+        "teacher_id": teacher["id"], "classroom_id": classroom["id"], "subject_id": subject["id"], "academic_year_id": year["id"],
+    }, headers=headers)
+
+    s1 = client.post(
+        "/students",
+        json={"classroom_id": classroom["id"], "first_name": "أمين", "last_name": "خالدي", "guardian_phone": "0555000000"},
+        headers=headers,
+    ).json()
+    s2 = client.post(
+        "/students", json={"classroom_id": classroom["id"], "first_name": "هدى", "last_name": "بن علي"}, headers=headers
+    ).json()
+
+    class_session = client.post(
+        "/class-sessions", json={"classroom_id": classroom["id"], "subject_id": subject["id"], "date": "2025-10-10"}, headers=headers
+    ).json()
+    client.post(
+        f"/class-sessions/{class_session['id']}/events",
+        json={"session_id": class_session["id"], "student_id": s1["id"], "event_type": "attendance_absent"},
+        headers=headers,
+    )
+
+    client.post(
+        "/notebook-checks", json={"student_id": s1["id"], "check_date": "2025-10-12", "quality": "organized"}, headers=headers
+    )
+
+    assessment = client.post(
+        "/assessments",
+        json={
+            "classroom_id": classroom["id"], "subject_id": subject["id"], "assessment_type": "test",
+            "title": "الفرض الأول", "date": "2025-10-05", "coefficient": 1, "max_score": 20,
+        },
+        headers=headers,
+    ).json()
+    client.post(
+        "/assessment-scores", json={"assessment_id": assessment["id"], "student_id": s1["id"], "score": 15}, headers=headers
+    )
+    # s2 is deliberately left ungraded on this assessment.
+
+    # Not homeroom teacher yet (just the creator + a subject assignment) -> refused, same as the council report.
+    too_early = client.get(f"/export/classrooms/{classroom['id']}/full-backup.xlsx", params={"term_id": term["id"]}, headers=headers)
+    assert too_early.status_code == 403
+
+    client.patch(f"/classrooms/{classroom['id']}/homeroom-teacher", json={"homeroom_teacher_id": teacher["id"]}, headers=headers)
+
+    # A stranger with no relation to the classroom still can't, homeroom-only-ness aside.
+    denied = client.get(f"/export/classrooms/{classroom['id']}/full-backup.xlsx", params={"term_id": term["id"]}, headers=headers_other)
+    assert denied.status_code == 403
+
+    resp = client.get(f"/export/classrooms/{classroom['id']}/full-backup.xlsx", params={"term_id": term["id"]}, headers=headers)
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    wb = load_workbook(io.BytesIO(resp.content))
+    assert wb.sheetnames == ["التلاميذ", "علامة السلوك", "الفروض والاختبارات", "سجل الحضور والسلوك", "فحص الكراس"]
+
+    students_rows = list(wb["التلاميذ"].iter_rows(min_row=2, values_only=True))
+    assert len(students_rows) == 2
+    amin_row = next(r for r in students_rows if r[0] == "أمين")
+    assert amin_row[5] == "0555000000"  # هاتف ولي الأمر column
+
+    behavior_rows = {r[0]: r for r in wb["علامة السلوك"].iter_rows(min_row=2, values_only=True)}
+    assert "أمين خالدي" in behavior_rows and "هدى بن علي" in behavior_rows
+    behavior_header = [c.value for c in next(wb["علامة السلوك"].iter_rows(min_row=1, max_row=1))]
+    assert behavior_header[-1] == "المجموع"
+
+    assessment_rows = list(wb["الفروض والاختبارات"].iter_rows(min_row=2, values_only=True))
+    assert len(assessment_rows) == 2  # one row per (student × assessment), s2 included even though ungraded
+    amin_grade_row = next(r for r in assessment_rows if r[0] == "أمين خالدي")
+    huda_grade_row = next(r for r in assessment_rows if r[0] == "هدى بن علي")
+    assert amin_grade_row[5] == 15  # العلامة
+    assert huda_grade_row[5] is None  # لم تُدخَل بعد -- الصف موجود، الخانة فارغة
+
+    log_rows = list(wb["سجل الحضور والسلوك"].iter_rows(min_row=2, values_only=True))
+    assert any(r[2] == "أمين خالدي" and r[3] == "غائب" for r in log_rows)
+
+    notebook_rows = list(wb["فحص الكراس"].iter_rows(min_row=2, values_only=True))
+    assert notebook_rows[0][0] == "أمين خالدي" and notebook_rows[0][2] == "منظم"
