@@ -26,10 +26,10 @@ from app.auth import get_current_user
 from app.database import get_session
 from app.models.assessment import Assessment, AssessmentScore
 from app.models.common import AssessmentType, UserRole
-from app.models.identity import Classroom, TeacherClassroomAssignment, Term, User
+from app.models.identity import Classroom, Subject, TeacherClassroomAssignment, Term, User
 from app.models.student import Student
 from app.routers.behavior import compute_behavior_score
-from app.schemas.grades import SubjectTermGrade
+from app.schemas.grades import SubjectGradeTrend, SubjectGradeTrendPoint, SubjectTermGrade
 
 router = APIRouter(tags=["grades"])
 
@@ -159,3 +159,63 @@ def get_subject_term_grade(
     _ensure_can_view_subject_grades(session, classroom, subject_id, current_user)
 
     return compute_subject_term_grade(session, student_id, classroom_id, subject_id, term_id)
+
+
+@router.get("/students/{student_id}/subject-grade-trend", response_model=SubjectGradeTrend)
+def get_subject_grade_trend(
+    student_id: str,
+    classroom_id: str,
+    subject_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """مخطط تطور المعدل عبر الفصول -- the same subject-grade formula as
+    /students/{id}/subject-grade, computed once per term of the classroom's
+    academic year instead of just the current one, so a teacher can see
+    whether a student is improving or slipping over the year rather than a
+    single snapshot. Gated exactly like the single-term endpoint above: a
+    subject teacher sees their own subject's trend, the homeroom
+    teacher/admin can see any subject's (see _ensure_can_view_subject_grades).
+    """
+    student = session.get(Student, student_id)
+    if not student or student.is_deleted:
+        raise HTTPException(status_code=404, detail="التلميذ غير موجود")
+    classroom = session.get(Classroom, classroom_id)
+    if not classroom or classroom.is_deleted:
+        raise HTTPException(status_code=404, detail="القسم غير موجود")
+    _ensure_can_view_subject_grades(session, classroom, subject_id, current_user)
+    subject = session.get(Subject, subject_id)
+    if not subject or subject.is_deleted:
+        raise HTTPException(status_code=404, detail="المادة غير موجودة")
+
+    terms = session.exec(
+        select(Term)
+        .where(
+            Term.academic_year_id == classroom.academic_year_id,
+            Term.is_deleted == False,  # noqa: E712
+        )
+        .order_by(Term.order_index)
+    ).all()
+
+    points: list[SubjectGradeTrendPoint] = []
+    for term in terms:
+        grade = compute_subject_term_grade(session, student_id, classroom_id, subject_id, term.id)
+        points.append(
+            SubjectGradeTrendPoint(
+                term_id=term.id,
+                term_label=term.label,
+                order_index=term.order_index,
+                continuous_assessment=grade.continuous_assessment,
+                test_average=grade.test_average,
+                exam_average=grade.exam_average,
+                average=grade.average,
+            )
+        )
+
+    return SubjectGradeTrend(
+        student_id=student_id,
+        classroom_id=classroom_id,
+        subject_id=subject_id,
+        subject_name=subject.name,
+        points=points,
+    )

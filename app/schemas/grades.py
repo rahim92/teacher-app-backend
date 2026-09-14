@@ -29,3 +29,36 @@ class SubjectTermGrade(BaseModel):
     test_average: Optional[float] = None
     exam_average: Optional[float] = None
     average: Optional[float] = None
+
+
+class SubjectGradeTrendPoint(BaseModel):
+    """One term's SubjectTermGrade, reshaped for charting -- same four grade
+    fields as SubjectTermGrade plus the term's own label/ordering so a
+    frontend can plot them left-to-right without a second lookup.
+    """
+
+    term_id: str
+    term_label: str
+    order_index: int
+    continuous_assessment: float
+    test_average: Optional[float] = None
+    exam_average: Optional[float] = None
+    average: Optional[float] = None
+
+
+class SubjectGradeTrend(BaseModel):
+    """مخطط تطور المعدل عبر الفصول -- one student's subject-grade history
+    across every term of the classroom's academic year, ordered by
+    Term.order_index. Built by calling grades.compute_subject_term_grade
+    once per term (never a separate averaging implementation), so a term
+    shown here can never disagree with what /students/{id}/subject-grade
+    reports for that same term. A term with no فرض/اختبار graded yet simply
+    carries `average=None` at its position -- still returned (not skipped),
+    so a chart can render a gap rather than silently compressing the axis.
+    """
+
+    student_id: str
+    classroom_id: str
+    subject_id: str
+    subject_name: str
+    points: list[SubjectGradeTrendPoint]

@@ -1377,6 +1377,103 @@ def test_subject_grade_combines_continuous_with_test_and_exam_and_gates_by_subje
     assert as_creator.status_code == 200
 
 
+def test_subject_grade_trend_covers_every_term_of_the_year_and_is_gated_like_subject_grade():
+    """GET /students/{id}/subject-grade-trend -- مخطط تطور المعدل عبر
+    الفصول. Reuses grades.compute_subject_term_grade once per term of the
+    classroom's academic year (never a separate averaging path), so this
+    must never disagree with /subject-grade for the same term. Covers: a
+    second term with no فرض/اختبار yet still appears in the trend with
+    average=None (not skipped -- a chart needs the gap, not a compressed
+    axis), terms come back ordered by order_index even when created out of
+    order, and access is gated exactly like the single-term endpoint (a
+    teacher assigned to a different subject is refused).
+    """
+    headers_creator, _teacher_creator = _register_and_login("trend_creator_t")
+    headers_owner, teacher_owner = _register_and_login("trend_subject_t")
+    headers_other, teacher_other = _register_and_login("trend_other_subj_t")
+    year, term1, classroom = _setup_classroom(headers_creator, "2AM - trend")
+
+    # A second term in the SAME academic year, deliberately posted with a
+    # lower order_index than term1's (1) to prove the endpoint sorts by
+    # order_index rather than by creation/insertion order.
+    term2 = client.post(
+        "/terms",
+        json={
+            "academic_year_id": year["id"], "label": "الفصل الثاني",
+            "start_date": "2026-01-05", "end_date": "2026-03-31", "order_index": 2,
+        },
+        headers=headers_creator,
+    ).json()
+
+    student = client.post(
+        "/students", json={"classroom_id": classroom["id"], "first_name": "نور", "last_name": "بلقاسمي"}, headers=headers_creator
+    ).json()
+    subject = client.post("/subjects", json={"name": "اللغة الإنجليزية"}, headers=headers_creator).json()
+    other_subject = client.post("/subjects", json={"name": "التربية الإسلامية"}, headers=headers_creator).json()
+    client.post(
+        "/teacher-classroom-assignments",
+        json={"teacher_id": teacher_owner["id"], "classroom_id": classroom["id"], "subject_id": subject["id"], "academic_year_id": year["id"]},
+        headers=headers_creator,
+    )
+    client.post(
+        "/teacher-classroom-assignments",
+        json={"teacher_id": teacher_other["id"], "classroom_id": classroom["id"], "subject_id": other_subject["id"], "academic_year_id": year["id"]},
+        headers=headers_creator,
+    )
+
+    # Term 1: both فرض واختبار graded -> a real average, matching the
+    # existing subject-grade test's own arithmetic (10.17).
+    test_assessment = client.post(
+        "/assessments",
+        json={
+            "classroom_id": classroom["id"], "subject_id": subject["id"], "assessment_type": "test",
+            "title": "فرض 1", "date": "2025-10-01", "coefficient": 1, "max_score": 20,
+        },
+        headers=headers_creator,
+    ).json()
+    client.post("/assessment-scores", json={"assessment_id": test_assessment["id"], "student_id": student["id"], "score": 12}, headers=headers_creator)
+    exam_assessment = client.post(
+        "/assessments",
+        json={
+            "classroom_id": classroom["id"], "subject_id": subject["id"], "assessment_type": "exam",
+            "title": "اختبار الفصل الأول", "date": "2025-12-05", "coefficient": 1, "max_score": 20,
+        },
+        headers=headers_creator,
+    ).json()
+    client.post("/assessment-scores", json={"assessment_id": exam_assessment["id"], "student_id": student["id"], "score": 10}, headers=headers_creator)
+
+    trend = client.get(
+        f"/students/{student['id']}/subject-grade-trend",
+        params={"classroom_id": classroom["id"], "subject_id": subject["id"]},
+        headers=headers_owner,
+    ).json()
+    assert trend["subject_name"] == "اللغة الإنجليزية"
+    assert [p["term_id"] for p in trend["points"]] == [term1["id"], term2["id"]]  # ordered by order_index, not creation order
+    assert trend["points"][0]["average"] == 10.17
+    # Term 2 has no فرض/اختبار at all yet: still present, average is None
+    # rather than the point being dropped from the list.
+    assert trend["points"][1]["term_id"] == term2["id"]
+    assert trend["points"][1]["average"] is None
+    assert trend["points"][1]["test_average"] is None
+
+    # Gated exactly like /subject-grade: a teacher assigned to a different
+    # subject in this same classroom is refused.
+    denied = client.get(
+        f"/students/{student['id']}/subject-grade-trend",
+        params={"classroom_id": classroom["id"], "subject_id": subject["id"]},
+        headers=headers_other,
+    )
+    assert denied.status_code == 403
+
+    # The classroom's creator can still see every subject's trend.
+    as_creator = client.get(
+        f"/students/{student['id']}/subject-grade-trend",
+        params={"classroom_id": classroom["id"], "subject_id": subject["id"]},
+        headers=headers_creator,
+    )
+    assert as_creator.status_code == 200
+
+
 def test_lesson_log_richer_types_validation_ownership_and_search():
     """The richer دفتر النصوص/الكراس اليومي: lesson_type + domain/segment/
     lesson_title/completed_phases free-text fields (typed by the teacher,
