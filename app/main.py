@@ -28,25 +28,6 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/health/pdf-engine")
-def health_pdf_engine():
-    """TEMPORARY diagnostic -- checks whether WeasyPrint's native
-    cairo/pango libraries are actually usable on THIS deployment (Render's
-    free "python" native runtime, no Dockerfile, no apt-get in the build
-    step), before building a real feature on top of it. `weasyprint` the
-    PyPI package can install fine via pip while still failing at import/
-    render time with an OSError if the underlying .so files aren't present
-    on the host -- which `except ImportError` elsewhere in this codebase
-    would NOT catch. To be removed once the answer is known either way."""
-    try:
-        from weasyprint import HTML
-
-        pdf_bytes = HTML(string="<b>test</b>").write_pdf()
-        return {"weasyprint_ok": True, "pdf_bytes": len(pdf_bytes)}
-    except Exception as exc:  # noqa: BLE001 -- diagnostic route, want ANY failure surfaced
-        return {"weasyprint_ok": False, "error_type": type(exc).__name__, "error": str(exc)}
-
-
 app.include_router(auth.router)
 app.include_router(academic.router)
 app.include_router(students.router)

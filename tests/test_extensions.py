@@ -1880,3 +1880,83 @@ def test_classroom_full_backup_export_xlsx_and_is_homeroom_gated():
 
     notebook_rows = list(wb["فحص الكراس"].iter_rows(min_row=2, values_only=True))
     assert notebook_rows[0][0] == "أمين خالدي" and notebook_rows[0][2] == "منظم"
+
+
+def test_grade_sheets_pdf_covers_whole_classroom_or_one_student_and_is_homeroom_gated():
+    """§41: كشف نقاط القسم الفصلي كملف PDF أصلي حقيقي -- built from the exact
+    same council.build_council_report data as GET /council/classrooms/{id}/
+    report, so it can never disagree with that report. Gated identically
+    (homeroom teacher/admin only). Covers both call shapes: no student_id
+    returns one PDF with one page per student; student_id returns a single-
+    page PDF for just that student, 404 if that student isn't in this
+    classroom. Uses pypdf (test-only dependency, see requirements.txt) to
+    verify the response is a REAL, correctly-paginated PDF, not just a
+    200 with the right content-type.
+    """
+    from unittest.mock import patch
+
+    from pypdf import PdfReader
+
+    from app.routers import export as export_router
+
+    headers, teacher = _register_and_login("gradesheet_t")
+    headers_other, _ = _register_and_login("gradesheet_stranger")
+    year, term, classroom = _setup_classroom(headers, "2AM - grade-sheets")
+    subject = client.post("/subjects", json={"name": "التاريخ والجغرافيا"}, headers=headers).json()
+    client.post("/teacher-classroom-assignments", json={
+        "teacher_id": teacher["id"], "classroom_id": classroom["id"], "subject_id": subject["id"], "academic_year_id": year["id"],
+    }, headers=headers)
+
+    s1 = client.post(
+        "/students", json={"classroom_id": classroom["id"], "first_name": "سارة", "last_name": "مرزوقي"}, headers=headers
+    ).json()
+    s2 = client.post(
+        "/students", json={"classroom_id": classroom["id"], "first_name": "إلياس", "last_name": "بوزيد"}, headers=headers
+    ).json()
+
+    url = f"/export/classrooms/{classroom['id']}/grade-sheets.pdf"
+    params = {"term_id": term["id"]}
+
+    # Not homeroom teacher yet -> refused, same as the council report and the full-backup export.
+    too_early = client.get(url, params=params, headers=headers)
+    assert too_early.status_code == 403
+
+    client.patch(f"/classrooms/{classroom['id']}/homeroom-teacher", json={"homeroom_teacher_id": teacher["id"]}, headers=headers)
+
+    denied = client.get(url, params=params, headers=headers_other)
+    assert denied.status_code == 403
+
+    # Whole classroom: one page per student (2 students -> 2 pages). PDF
+    # byte-level checks (page count, magic bytes, content-type) are done
+    # against the real HTTP response; Arabic CONTENT correctness (right
+    # names, right filtering) is checked separately below via the actual
+    # HTML the same request built, captured by patching _html_to_pdf rather
+    # than parsed back out of the PDF -- pypdf's text extraction reorders/
+    # unjoins Amiri's shaped Arabic ligatures, so asserting Arabic
+    # substrings against `page.extract_text()` output is NOT reliable even
+    # though the PDF renders correctly (see _render_html's docstring).
+    with patch.object(export_router, "_html_to_pdf", wraps=export_router._html_to_pdf) as spy:
+        resp_all = client.get(url, params=params, headers=headers)
+    assert resp_all.status_code == 200, resp_all.text
+    assert resp_all.headers["content-type"] == "application/pdf"
+    assert resp_all.content[:4] == b"%PDF"
+    reader_all = PdfReader(io.BytesIO(resp_all.content))
+    assert len(reader_all.pages) == 2
+
+    with patch.object(export_router, "_html_to_pdf", wraps=export_router._html_to_pdf) as spy2:
+        resp_one = client.get(url, params={**params, "student_id": s1["id"]}, headers=headers)
+    assert resp_one.status_code == 200, resp_one.text
+    reader_one = PdfReader(io.BytesIO(resp_one.content))
+    assert len(reader_one.pages) == 1
+
+    # A student_id that isn't in this classroom -> 404, not an empty PDF.
+    missing = client.get(url, params={**params, "student_id": "not-a-real-id"}, headers=headers)
+    assert missing.status_code == 404
+
+    all_html = spy.call_args.args[0]
+    assert "سارة مرزوقي" in all_html and "إلياس بوزيد" in all_html
+    assert classroom["name"] in all_html
+
+    one_html = spy2.call_args.args[0]
+    assert "سارة مرزوقي" in one_html
+    assert "إلياس بوزيد" not in one_html

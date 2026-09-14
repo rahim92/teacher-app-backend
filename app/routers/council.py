@@ -48,29 +48,25 @@ def _ensure_can_view_council(classroom: Classroom, current_user: User) -> None:
         )
 
 
-@router.get("/classrooms/{classroom_id}/report", response_model=CouncilReport)
-def get_council_report(
-    classroom_id: str,
-    term_id: str,
-    session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_user),
-):
-    classroom = session.get(Classroom, classroom_id)
-    if not classroom or classroom.is_deleted:
-        raise HTTPException(status_code=404, detail="القسم غير موجود")
-    _ensure_can_view_council(classroom, current_user)
-
-    term = session.get(Term, term_id)
-    if not term or term.is_deleted:
-        raise HTTPException(status_code=404, detail="الفصل الدراسي غير موجود")
-
+def build_council_report(session: Session, classroom: Classroom, term: Term) -> CouncilReport:
+    """The actual report-building logic, factored out of the endpoint below
+    so other modules (export.py, for the native-PDF grade sheet) can reuse
+    the exact same per-student subject averages/rank/attendance numbers
+    without a second implementation that could silently drift from this
+    one -- same "compute, don't duplicate" rule this codebase already
+    follows for compute_behavior_score/compute_subject_term_grade.
+    Permission (`_ensure_can_view_council`) and classroom/term existence
+    are the CALLER's responsibility, not this function's -- callers already
+    need the Classroom/Term rows loaded for their own error messages before
+    they get here.
+    """
     students = session.exec(
-        select(Student).where(Student.classroom_id == classroom_id, Student.is_deleted == False)  # noqa: E712
+        select(Student).where(Student.classroom_id == classroom.id, Student.is_deleted == False)  # noqa: E712
     ).all()
 
     assignments = session.exec(
         select(TeacherClassroomAssignment).where(
-            TeacherClassroomAssignment.classroom_id == classroom_id,
+            TeacherClassroomAssignment.classroom_id == classroom.id,
             TeacherClassroomAssignment.is_deleted == False,  # noqa: E712
         )
     ).all()
@@ -88,7 +84,7 @@ def get_council_report(
         select(SessionEvent, ClassSession)
         .join(ClassSession, SessionEvent.session_id == ClassSession.id)  # type: ignore[arg-type]
         .where(
-            ClassSession.classroom_id == classroom_id,
+            ClassSession.classroom_id == classroom.id,
             ClassSession.date >= term.start_date,
             ClassSession.date <= term.end_date,
             SessionEvent.is_deleted == False,  # noqa: E712
@@ -106,7 +102,7 @@ def get_council_report(
         weight_total = 0.0
 
         for subject_id, subject in subjects.items():
-            grade = compute_subject_term_grade(session, student.id, classroom_id, subject_id, term_id)
+            grade = compute_subject_term_grade(session, student.id, classroom.id, subject_id, term.id)
             subject_avg = grade.average
 
             subject_averages.append(SubjectAverage(subject_id=subject_id, subject_name=subject.name, average=subject_avg))
@@ -136,9 +132,28 @@ def get_council_report(
     rows.sort(key=lambda r: (r.rank is None, r.rank if r.rank is not None else 0))
 
     return CouncilReport(
-        classroom_id=classroom_id,
+        classroom_id=classroom.id,
         classroom_name=classroom.name,
-        term_id=term_id,
+        term_id=term.id,
         term_label=term.label,
         rows=rows,
     )
+
+
+@router.get("/classrooms/{classroom_id}/report", response_model=CouncilReport)
+def get_council_report(
+    classroom_id: str,
+    term_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    classroom = session.get(Classroom, classroom_id)
+    if not classroom or classroom.is_deleted:
+        raise HTTPException(status_code=404, detail="القسم غير موجود")
+    _ensure_can_view_council(classroom, current_user)
+
+    term = session.get(Term, term_id)
+    if not term or term.is_deleted:
+        raise HTTPException(status_code=404, detail="الفصل الدراسي غير موجود")
+
+    return build_council_report(session, classroom, term)
