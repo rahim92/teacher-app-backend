@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import init_db
-from app.routers import academic, assessments, auth, behavior, council, curriculum, export, grades, messaging, sessions, students, sync
+from app.routers import academic, alerts, assessments, auth, behavior, council, curriculum, export, grades, messaging, sessions, students, sync
 
 app = FastAPI(title="Middle School Teacher App API")
 
@@ -39,4 +39,5 @@ app.include_router(export.router)
 app.include_router(council.router)
 app.include_router(behavior.router)
 app.include_router(grades.router)
+app.include_router(alerts.router)
 app.include_router(sync.router)

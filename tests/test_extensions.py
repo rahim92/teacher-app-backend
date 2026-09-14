@@ -5,6 +5,7 @@ and the auto-computed behaviour score.
 import io
 import os
 import uuid
+from datetime import date
 
 os.environ["DATABASE_URL"] = "sqlite:///./test_extensions.db"
 
@@ -1592,3 +1593,103 @@ def test_behavior_weight_settings_customize_score_reset_and_are_ownership_gated(
     ).json()
     assert score_after_reset["total_max"] == 20.0
     assert {b["category"]: b["points_max"] for b in score_after_reset["breakdown"]}["conduct"] == 2.0
+
+
+def test_classroom_alerts_flag_absences_stale_notebooks_and_ungraded_assessments():
+    """§38: the home-screen alerts panel surfaces three things a teacher
+    would otherwise have to notice by memory or by opening several screens
+    one at a time -- repeated absence/tardiness, a notebook not checked in
+    a while, and an assessment still missing scores for some students."""
+    headers, _teacher = _register_and_login("alerts_t")
+    headers_other, _ = _register_and_login("alerts_stranger")
+    year, _default_term, classroom = _setup_classroom(headers, "2AM - alerts")
+    # A wide-range term (covering the real "today") instead of the helper's
+    # fixed 2025 term -- "checked N days ago" is only meaningfully testable
+    # against a term that actually spans the calendar date the endpoint
+    # compares against.
+    term = client.post(
+        "/terms",
+        json={"academic_year_id": year["id"], "label": "فصل موسَّع", "start_date": "2020-01-01", "end_date": "2030-12-31", "order_index": 2},
+        headers=headers,
+    ).json()
+    subject = client.post("/subjects", json={"name": "الرياضيات"}, headers=headers).json()
+
+    frequent_absentee = client.post(
+        "/students", json={"classroom_id": classroom["id"], "first_name": "ياسين", "last_name": "غ"}, headers=headers
+    ).json()
+    fine_student = client.post(
+        "/students", json={"classroom_id": classroom["id"], "first_name": "أمينة", "last_name": "س"}, headers=headers
+    ).json()
+
+    class_session = client.post(
+        "/class-sessions", json={"classroom_id": classroom["id"], "subject_id": subject["id"], "date": str(date.today())}, headers=headers
+    ).json()
+    # 2 absences + 1 tardiness = 3 taps of the combined column -> meets the
+    # default min_absences=3 threshold.
+    for event_type in ["attendance_absent", "attendance_absent", "tardiness"]:
+        client.post(
+            f"/class-sessions/{class_session['id']}/events",
+            json={"session_id": class_session["id"], "student_id": frequent_absentee["id"], "event_type": event_type},
+            headers=headers,
+        )
+    # fine_student: only 1 absence -- below threshold, shouldn't be flagged.
+    client.post(
+        f"/class-sessions/{class_session['id']}/events",
+        json={"session_id": class_session["id"], "student_id": fine_student["id"], "event_type": "attendance_absent"},
+        headers=headers,
+    )
+
+    # Notebook checks: frequent_absentee checked TODAY (not stale);
+    # fine_student never checked at all this term (flagged as "never").
+    client.post(
+        "/notebook-checks",
+        json={"student_id": frequent_absentee["id"], "check_date": str(date.today()), "quality": "organized"},
+        headers=headers,
+    )
+
+    # An assessment with only one of the two students graded.
+    assessment = client.post(
+        "/assessments",
+        json={
+            "classroom_id": classroom["id"], "subject_id": subject["id"], "assessment_type": "test",
+            "title": "فرض التقويم", "date": str(date.today()), "coefficient": 1, "max_score": 20,
+        },
+        headers=headers,
+    ).json()
+    client.post(
+        "/assessment-scores",
+        json={"assessment_id": assessment["id"], "student_id": frequent_absentee["id"], "score": 14},
+        headers=headers,
+    )
+
+    # Ownership: a stranger teacher (no relation to this classroom) may not view its alerts.
+    denied = client.get(f"/classrooms/{classroom['id']}/alerts", params={"term_id": term["id"]}, headers=headers_other)
+    assert denied.status_code == 403
+
+    result = client.get(f"/classrooms/{classroom['id']}/alerts", params={"term_id": term["id"]}, headers=headers)
+    assert result.status_code == 200, result.text
+    alerts = result.json()
+
+    absentee_ids = {a["student_id"] for a in alerts["repeated_absence"]}
+    assert frequent_absentee["id"] in absentee_ids
+    assert fine_student["id"] not in absentee_ids
+    flagged = next(a for a in alerts["repeated_absence"] if a["student_id"] == frequent_absentee["id"])
+    assert flagged["absence_count"] == 3
+
+    stale_by_student = {a["student_id"]: a for a in alerts["stale_notebooks"]}
+    assert frequent_absentee["id"] not in stale_by_student  # checked today -> not stale
+    assert fine_student["id"] in stale_by_student
+    assert stale_by_student[fine_student["id"]]["last_check_date"] is None
+    assert stale_by_student[fine_student["id"]]["days_since_check"] is None
+
+    ungraded_by_id = {a["assessment_id"]: a for a in alerts["ungraded_assessments"]}
+    assert assessment["id"] in ungraded_by_id
+    assert ungraded_by_id[assessment["id"]]["missing_count"] == 1
+    assert ungraded_by_id[assessment["id"]]["total_students"] == 2
+
+    # A looser threshold changes what gets flagged -- proves the query
+    # params actually drive the computation, not just a fixed default.
+    loose = client.get(
+        f"/classrooms/{classroom['id']}/alerts", params={"term_id": term["id"], "min_absences": 5}, headers=headers
+    ).json()
+    assert loose["repeated_absence"] == []
