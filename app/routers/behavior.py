@@ -70,7 +70,7 @@ from app.models.common import NotebookQuality
 from app.models.identity import Classroom, Term, User
 from app.models.session import ClassSession, SessionEvent
 from app.models.student import NotebookCheck, Student
-from app.routers.students import _ensure_can_manage_classroom_roster
+from app.routers.students import _ensure_can_manage_classroom_roster, _ensure_can_manage_student
 from app.schemas.behavior import BehaviorCategoryScore, BehaviorScore, BehaviorWeights, BehaviorWeightsRead
 
 router = APIRouter(tags=["behavior"])
@@ -322,8 +322,17 @@ def get_behavior_score(
     w_teamwork: float | None = Query(default=None),
     w_initiative: float | None = Query(default=None),
     session: Session = Depends(get_session),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ) -> BehaviorScore:
+    # §77 -- had no ownership/relation check at all until now, same gap as
+    # `student_ledger`/`list_notebook_checks` (fixed alongside this one):
+    # any signed-in teacher could compute and read any student's behavior
+    # score, in any classroom, just by guessing/knowing a student_id.
+    student = session.get(Student, student_id)
+    if not student or student.is_deleted:
+        raise HTTPException(status_code=404, detail="التلميذ غير موجود")
+    _ensure_can_manage_student(session, student, current_user)
+
     overrides = {
         "conduct": w_conduct,
         "attendance": w_attendance,

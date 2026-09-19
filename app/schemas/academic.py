@@ -125,6 +125,28 @@ class TeacherClassroomAssignmentRead(TeacherClassroomAssignmentCreate):
     id: str
 
 
+class TeacherAssignmentDisplay(BaseModel):
+    """Enriched view used only by GET /classrooms/{id}/teacher-assignments
+    (§74 mobile gap-analysis) -- the raw TeacherClassroomAssignmentRead above
+    (still returned as-is by POST /teacher-classroom-assignments, unchanged)
+    carries only teacher_id/subject_id foreign keys, which is fine for a
+    create response the caller already knows the names for, but useless for
+    a listing screen: no client (web or mobile) mirrors a Users/Teachers
+    table locally (identity data is deliberately excluded from
+    ENTITY_MODEL_MAP in sync.py -- see its own comment), so a bare
+    teacher_id UUID has no name to resolve against on-device. Same shape/
+    naming convention as the existing TaughtSubjectInfo (subject_id +
+    subject_name pairing) above, extended with the equivalent teacher pair.
+    """
+
+    id: str
+    teacher_id: str
+    teacher_name: str
+    subject_id: str
+    subject_name: str
+    academic_year_id: str
+
+
 class ClassDelegateCreate(BaseModel):
     classroom_id: str
     student_id: str

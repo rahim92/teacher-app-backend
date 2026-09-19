@@ -154,8 +154,24 @@ def create_student(payload: StudentCreate, session: Session = Depends(get_sessio
 def list_students(
     classroom_id: str,
     session: Session = Depends(get_session),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
+    """§77 (fresh gap-analysis round): this had NO ownership/relation check
+    at all -- unlike `create_student`/`import_students` just above it (both
+    already gated by `_ensure_can_manage_classroom_roster`), and unlike
+    `update_student`/`delete_student` below (gated by
+    `_ensure_can_manage_student`). `StudentRead` carries `guardian_phone`
+    and `medical_notes`, and classroom ids are freely enumerable via the
+    deliberately-open `GET /classrooms/directory` -- so any signed-in
+    teacher could list every child's guardian phone number and medical
+    notes for ANY classroom in the school, not just one they teach. Same
+    severity class, same relation rule, as the §21 review pass -- that pass
+    covered every WRITE path on Student but missed this READ path.
+    """
+    classroom = session.get(Classroom, classroom_id)
+    if not classroom or classroom.is_deleted:
+        raise HTTPException(status_code=404, detail="القسم غير موجود")
+    _ensure_can_manage_classroom_roster(session, classroom, current_user)
     return session.exec(
         select(Student).where(Student.classroom_id == classroom_id, Student.is_deleted == False)  # noqa: E712
     ).all()
@@ -546,7 +562,16 @@ def list_special_needs(student_id: str, session: Session = Depends(get_session),
 
 
 @router.get("/students/{student_id}/notebook-checks", response_model=list[NotebookCheckRead])
-def list_notebook_checks(student_id: str, session: Session = Depends(get_session), _: User = Depends(get_current_user)):
+def list_notebook_checks(student_id: str, session: Session = Depends(get_session), current_user: User = Depends(get_current_user)):
+    """§77 -- same missing-relation-check bug as `list_students` above, just
+    keyed by student_id instead of classroom_id. Gated with the same
+    `_ensure_can_manage_student` helper `PATCH`/`DELETE /students/{id}`
+    already use.
+    """
+    student = session.get(Student, student_id)
+    if not student or student.is_deleted:
+        raise HTTPException(status_code=404, detail="التلميذ غير موجود")
+    _ensure_can_manage_student(session, student, current_user)
     return session.exec(
         select(NotebookCheck).where(NotebookCheck.student_id == student_id, NotebookCheck.is_deleted == False)  # noqa: E712
     ).all()

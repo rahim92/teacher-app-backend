@@ -9,6 +9,8 @@ from app.database import get_session
 from app.models.common import LessonLogType, SessionStatus, UserRole
 from app.models.identity import Classroom, TeacherClassroomAssignment, User
 from app.models.session import ClassSession, LessonLog, SessionEvent
+from app.models.student import Student
+from app.routers.students import _ensure_can_manage_student
 from app.schemas.session import (
     ClassSessionClose,
     ClassSessionCreate,
@@ -310,11 +312,23 @@ def list_lesson_logs(
 
 
 @router.get("/students/{student_id}/ledger", response_model=list[SessionEventRead])
-def student_ledger(student_id: str, session: Session = Depends(get_session), _: User = Depends(get_current_user)):
+def student_ledger(student_id: str, session: Session = Depends(get_session), current_user: User = Depends(get_current_user)):
     """The 'دفتر التلميذ' timeline: every quick-tap event ever logged for one
     student, across all sessions. Aggregation (counts, rates) is computed
     client-side or in a future dedicated report endpoint.
+
+    §77 -- had no ownership/relation check at all until now (`_:
+    User = Depends(get_current_user)` was only checking the token was
+    valid, not that the caller has anything to do with this student's
+    classroom). Every behavior/attendance tap ever logged for a child is
+    exactly the kind of cross-teacher data leak §21 fixed elsewhere; this
+    endpoint was missed in that pass. Gated with the same
+    `_ensure_can_manage_student` helper students.py's own write paths use.
     """
+    student = session.get(Student, student_id)
+    if not student or student.is_deleted:
+        raise HTTPException(status_code=404, detail="التلميذ غير موجود")
+    _ensure_can_manage_student(session, student, current_user)
     return session.exec(
         select(SessionEvent).where(SessionEvent.student_id == student_id, SessionEvent.is_deleted == False)  # noqa: E712
     ).all()

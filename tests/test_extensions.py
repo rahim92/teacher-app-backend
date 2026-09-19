@@ -2025,3 +2025,134 @@ def test_grade_sheets_pdf_covers_whole_classroom_or_one_student_and_is_homeroom_
     one_html = spy2.call_args.args[0]
     assert "سارة مرزوقي" in one_html
     assert "إلياس بوزيد" not in one_html
+
+
+def test_teacher_assignments_listing_includes_names_and_is_open_to_any_teacher():
+    """§74 (mobile gap-analysis follow-up): GET /classrooms/{id}/teacher-
+    assignments used to return bare TeacherClassroomAssignmentRead rows --
+    just teacher_id/subject_id foreign keys, useless to any client since
+    neither the mobile app nor classroom_dashboard.html mirrors a
+    Users/Teachers table locally. Enriched to return teacher_name/
+    subject_name (join User+Subject), mirroring TaughtSubjectInfo's existing
+    subject_id+subject_name pairing on /my-classrooms. Also confirms the
+    endpoint stays open to ANY authenticated teacher (unlike the council
+    report/full-backup export, which are homeroom-only) -- "who teaches this
+    classroom" isn't sensitive the way grades/attendance are.
+    """
+    headers_main, teacher_main = _register_and_login("assign_main_t")
+    headers_colleague, teacher_colleague = _register_and_login("assign_colleague_t")
+    headers_stranger, _ = _register_and_login("assign_stranger_t")
+    year, _term, classroom = _setup_classroom(headers_main, "3AM - assignments")
+    subject = client.post("/subjects", json={"name": "العلوم الطبيعية والحياة"}, headers=headers_main).json()
+
+    # Classroom creator (manager) registers a COLLEAGUE, not themself -- the
+    # "homeroom teacher enrolls another subject teacher" pattern §22 fixed.
+    assign_resp = client.post(
+        "/teacher-classroom-assignments",
+        json={
+            "teacher_id": teacher_colleague["id"],
+            "classroom_id": classroom["id"],
+            "subject_id": subject["id"],
+            "academic_year_id": year["id"],
+        },
+        headers=headers_main,
+    )
+    assert assign_resp.status_code == 200, assign_resp.text
+
+    # A completely unrelated third teacher (never assigned, never homeroom)
+    # can still list -- open GET, matching every other read in this router.
+    listing = client.get(f"/classrooms/{classroom['id']}/teacher-assignments", headers=headers_stranger)
+    assert listing.status_code == 200, listing.text
+    rows = listing.json()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["teacher_id"] == teacher_colleague["id"]
+    assert row["teacher_name"] == teacher_colleague["full_name"]
+    assert row["subject_id"] == subject["id"]
+    assert row["subject_name"] == "العلوم الطبيعية والحياة"
+    assert row["academic_year_id"] == year["id"]
+    # The classroom creator/manager themself never self-assigned a subject
+    # here, so they must NOT appear as a phantom row.
+    assert all(r["teacher_id"] != teacher_main["id"] for r in rows)
+
+
+def test_fresh_review_read_path_ownership_gaps():
+    """§77: a fresh gap-analysis pass (explicitly NOT reusing the §21-§24
+    list) found FOUR read (GET) endpoints with no ownership/relation check
+    at all -- every earlier review pass (§21-§24) covered write paths, and
+    missed these. All four leak either a full student roster (guardian
+    phone + medical notes) or a single student's private history to ANY
+    authenticated teacher, not just one with a real relation to that
+    classroom:
+      - GET /classrooms/{id}/students
+      - GET /students/{id}/ledger
+      - GET /students/{id}/notebook-checks
+      - GET /students/{id}/behavior-score
+    Each is now gated by the same `_ensure_can_manage_classroom_roster`/
+    `_ensure_can_manage_student` helpers the write paths already use.
+    Mirrors test_cross_teacher_authorization_gaps's own shape: an unrelated
+    stranger is rejected, the real owner is accepted, and a teacher merely
+    ASSIGNED to teach a subject in the classroom (not its creator) is still
+    accepted -- the fix must not break the everyday multi-teacher case.
+    """
+    headers_a, _teacher_a = _register_and_login("readgap_owner")
+    headers_b, _teacher_b = _register_and_login("readgap_stranger")
+    year, term, classroom = _setup_classroom(headers_a, "1AM - readgap")
+    student = client.post(
+        "/students", json={"classroom_id": classroom["id"], "first_name": "نور", "last_name": "بلحاج"}, headers=headers_a
+    ).json()
+
+    # GET /classrooms/{id}/students
+    assert client.get(f"/classrooms/{classroom['id']}/students", headers=headers_b).status_code == 403
+    roster = client.get(f"/classrooms/{classroom['id']}/students", headers=headers_a)
+    assert roster.status_code == 200, roster.text
+    assert any(s["id"] == student["id"] for s in roster.json())
+
+    # GET /students/{id}/ledger -- needs at least one real tap logged.
+    subject = client.post("/subjects", json={"name": "الرياضيات"}, headers=headers_a).json()
+    class_session = client.post(
+        "/class-sessions",
+        json={"classroom_id": classroom["id"], "subject_id": subject["id"], "date": "2026-09-20"},
+        headers=headers_a,
+    )
+    assert class_session.status_code == 200, class_session.text
+    class_session = class_session.json()
+    client.post(
+        f"/class-sessions/{class_session['id']}/events",
+        json={"session_id": class_session["id"], "student_id": student["id"], "event_type": "attendance_absent"},
+        headers=headers_a,
+    )
+
+    assert client.get(f"/students/{student['id']}/ledger", headers=headers_b).status_code == 403
+    ledger = client.get(f"/students/{student['id']}/ledger", headers=headers_a)
+    assert ledger.status_code == 200, ledger.text
+    assert len(ledger.json()) == 1
+
+    # GET /students/{id}/notebook-checks
+    client.post(
+        "/notebook-checks",
+        json={"student_id": student["id"], "check_date": "2026-09-20", "quality": "organized"},
+        headers=headers_a,
+    )
+    assert client.get(f"/students/{student['id']}/notebook-checks", headers=headers_b).status_code == 403
+    checks = client.get(f"/students/{student['id']}/notebook-checks", headers=headers_a)
+    assert checks.status_code == 200, checks.text
+    assert len(checks.json()) == 1
+
+    # GET /students/{id}/behavior-score
+    score_params = {"classroom_id": classroom["id"], "term_id": term["id"]}
+    assert client.get(f"/students/{student['id']}/behavior-score", params=score_params, headers=headers_b).status_code == 403
+    score = client.get(f"/students/{student['id']}/behavior-score", params=score_params, headers=headers_a)
+    assert score.status_code == 200, score.text
+
+    # A teacher legitimately assigned (not the creator) must still pass all four.
+    subject2 = client.post("/subjects", json={"name": "الفيزياء"}, headers=headers_a).json()
+    headers_c, teacher_c = _register_and_login("readgap_assigned")
+    assign = client.post("/teacher-classroom-assignments", json={
+        "teacher_id": teacher_c["id"], "classroom_id": classroom["id"], "subject_id": subject2["id"], "academic_year_id": year["id"],
+    }, headers=headers_a)
+    assert assign.status_code == 200, assign.text
+    assert client.get(f"/classrooms/{classroom['id']}/students", headers=headers_c).status_code == 200
+    assert client.get(f"/students/{student['id']}/ledger", headers=headers_c).status_code == 200
+    assert client.get(f"/students/{student['id']}/notebook-checks", headers=headers_c).status_code == 200
+    assert client.get(f"/students/{student['id']}/behavior-score", params=score_params, headers=headers_c).status_code == 200

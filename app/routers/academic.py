@@ -34,6 +34,7 @@ from app.schemas.academic import (
     SubjectCreate,
     SubjectRead,
     TaughtSubjectInfo,
+    TeacherAssignmentDisplay,
     TeacherClassroomAssignmentCreate,
     TeacherClassroomAssignmentRead,
     TermCreate,
@@ -390,21 +391,43 @@ def assign_teacher_to_classroom(
     return assignment
 
 
-@router.get("/classrooms/{classroom_id}/teacher-assignments", response_model=list[TeacherClassroomAssignmentRead])
+@router.get("/classrooms/{classroom_id}/teacher-assignments", response_model=list[TeacherAssignmentDisplay])
 def list_teacher_assignments(
     classroom_id: str,
     session: Session = Depends(get_session),
     _: User = Depends(get_current_user),
 ):
     """Every subject teacher assigned to this classroom -- what a council
-    report joins across to gather each subject's grades.
+    report joins across to gather each subject's grades. Read-only, open to
+    any authenticated teacher (matching every other GET in this router) --
+    unlike the council report itself, knowing who teaches this classroom
+    isn't sensitive the way students' grades/attendance are.
+
+    **§74**: response enriched with teacher_name/subject_name (join
+    User+Subject) instead of the bare TeacherClassroomAssignmentRead's raw
+    foreign keys -- see TeacherAssignmentDisplay's own doc comment for why
+    the raw ids alone are useless to any client here.
     """
-    return session.exec(
-        select(TeacherClassroomAssignment).where(
+    rows = session.exec(
+        select(TeacherClassroomAssignment, User, Subject)
+        .join(User, User.id == TeacherClassroomAssignment.teacher_id)
+        .join(Subject, Subject.id == TeacherClassroomAssignment.subject_id)
+        .where(
             TeacherClassroomAssignment.classroom_id == classroom_id,
             TeacherClassroomAssignment.is_deleted == False,  # noqa: E712
         )
     ).all()
+    return [
+        TeacherAssignmentDisplay(
+            id=assignment.id,
+            teacher_id=assignment.teacher_id,
+            teacher_name=teacher.full_name,
+            subject_id=assignment.subject_id,
+            subject_name=subject.name,
+            academic_year_id=assignment.academic_year_id,
+        )
+        for assignment, teacher, subject in rows
+    ]
 
 
 def _ensure_can_manage_delegates(classroom: Classroom, current_user: User) -> None:
